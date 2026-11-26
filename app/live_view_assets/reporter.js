@@ -73,14 +73,25 @@ function getWorkflowName() {
     return "Unsaved Workflow";
 }
 
+function getComfyCanvas() {
+    return app?.canvas || window.app?.canvas || null;
+}
+
 function getCanvasElement() {
-    return app.canvas?.canvas || document.querySelector("canvas#graph-canvas") || null;
+    const c = getComfyCanvas()?.canvas;
+    if (c && c.isConnected) return c;
+    return (
+        document.querySelector("canvas#graph-canvas") ||
+        document.querySelector(".graph-canvas-container canvas") ||
+        document.querySelector("canvas") ||
+        null
+    );
 }
 
 function getViewport() {
     try {
-        const ds = app.canvas?.ds;
-        if (ds && typeof ds.scale === "number" && ds.offset && ds.offset.length >= 2) {
+        const ds = getComfyCanvas()?.ds;
+        if (ds && typeof ds.scale === "number" && ds.scale > 0 && ds.offset && ds.offset.length >= 2) {
             const vp = {
                 scale: Math.round(ds.scale * 1000) / 1000,
                 offset: [
@@ -106,7 +117,7 @@ function getViewport() {
 
 function clientToGraphCoords(clientX, clientY) {
     try {
-        const ds = app.canvas?.ds;
+        const ds = getComfyCanvas()?.ds;
         const canvasEl = getCanvasElement();
         if (!ds || !canvasEl || typeof ds.scale !== "number" || ds.scale <= 0) return null;
         const rect = canvasEl.getBoundingClientRect();
@@ -209,8 +220,8 @@ function extractNodeMeta(graph) {
 
 function getReportWsUrl() {
     const httpUrl = new URL("../../live-view/report", import.meta.url);
-    httpUrl.protocol = httpUrl.protocol === "https:" ? "wss:" : "ws:";
-    return httpUrl.toString();
+    const proto = httpUrl.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${httpUrl.host}${httpUrl.pathname}${httpUrl.search}`;
 }
 
 function ensureObserverOverlayStyles() {
@@ -222,7 +233,7 @@ function ensureObserverOverlayStyles() {
             position: fixed;
             inset: 0;
             pointer-events: none;
-            z-index: 99999;
+            z-index: 2147483647;
             overflow: hidden;
         }
         .clv-cursor {
@@ -340,17 +351,25 @@ function ensureObserverOverlayStyles() {
 
 function createObserverCursorRenderer() {
     ensureObserverOverlayStyles();
-    let layer = document.getElementById("comfy-live-view-cursor-layer");
-    if (!layer) {
-        layer = document.createElement("div");
-        layer.id = "comfy-live-view-cursor-layer";
-        document.body.appendChild(layer);
+
+    function getLayer() {
+        ensureObserverOverlayStyles();
+        let layer = document.getElementById("comfy-live-view-cursor-layer");
+        if (!layer) {
+            layer = document.createElement("div");
+            layer.id = "comfy-live-view-cursor-layer";
+        }
+        if (!layer.isConnected && document.body) {
+            document.body.appendChild(layer);
+        }
+        return layer;
     }
 
     const cursors = new Map(); // observer_id -> { x, y, cursorEl, offscreenEl, arrowEl }
     let rafId = null;
 
     function createEntryElements() {
+        const layer = getLayer();
         const cursorEl = document.createElement("div");
         cursorEl.className = "clv-cursor";
         cursorEl.innerHTML = `
@@ -382,9 +401,10 @@ function createObserverCursorRenderer() {
         rafId = null;
         if (cursors.size === 0) return;
 
+        getLayer();
         const canvasEl = getCanvasElement();
-        const ds = app.canvas?.ds;
-        if (!canvasEl || !ds || typeof ds.scale !== "number" || !ds.offset) {
+        const ds = getComfyCanvas()?.ds;
+        if (!canvasEl || !ds || typeof ds.scale !== "number" || ds.scale <= 0 || !ds.offset) {
             rafId = requestAnimationFrame(renderFrame);
             return;
         }

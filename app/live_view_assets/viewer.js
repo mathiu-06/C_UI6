@@ -858,6 +858,19 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         }
     }
 
+    // 6. Observer's own shared pointer position while Cursor: ON
+    if (!mini && !state.viewingSavedPath && state.shareCursor && state.observerCursorGraphPos) {
+        drawPointerMarker(
+            targetCtx,
+            state.observerCursorGraphPos.x,
+            state.observerCursorGraphPos.y,
+            camera.scale,
+            "#ff6b2b",
+            "#0f172a",
+            "My Cursor"
+        );
+    }
+
     targetCtx.restore();
 }
 
@@ -1545,7 +1558,9 @@ async function fetchSavedWorkflows(userId) {
     }
 }
 
-function sendObserverCursor(gx, gy, force = false) {
+let trailingCursorTimer = null;
+
+function flushObserverCursor(gx, gy) {
     if (
         !state.shareCursor ||
         state.mode !== "focus" ||
@@ -1556,9 +1571,7 @@ function sendObserverCursor(gx, gy, force = false) {
     ) {
         return;
     }
-    const now = Date.now();
-    if (!force && now - state.lastCursorSentAt < CURSOR_SEND_INTERVAL_MS) return;
-    state.lastCursorSentAt = now;
+    state.lastCursorSentAt = Date.now();
     state.cursorCurrentlyShown = true;
     try {
         state.ws.send(JSON.stringify({
@@ -1574,7 +1587,39 @@ function sendObserverCursor(gx, gy, force = false) {
     }
 }
 
+function sendObserverCursor(gx, gy, force = false) {
+    if (
+        !state.shareCursor ||
+        state.mode !== "focus" ||
+        state.viewingSavedPath ||
+        !state.selectedUserId ||
+        !state.ws ||
+        state.ws.readyState !== WebSocket.OPEN
+    ) {
+        return;
+    }
+    if (trailingCursorTimer) {
+        clearTimeout(trailingCursorTimer);
+        trailingCursorTimer = null;
+    }
+    const elapsed = Date.now() - state.lastCursorSentAt;
+    if (force || elapsed >= CURSOR_SEND_INTERVAL_MS) {
+        flushObserverCursor(gx, gy);
+    } else {
+        trailingCursorTimer = setTimeout(() => {
+            trailingCursorTimer = null;
+            if (state.shareCursor && state.observerCursorGraphPos) {
+                flushObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y);
+            }
+        }, CURSOR_SEND_INTERVAL_MS - elapsed);
+    }
+}
+
 function hideObserverCursor() {
+    if (trailingCursorTimer) {
+        clearTimeout(trailingCursorTimer);
+        trailingCursorTimer = null;
+    }
     state.observerCursorGraphPos = null;
     if (state.cursorCurrentlyShown && state.ws && state.ws.readyState === WebSocket.OPEN) {
         try {
@@ -1592,8 +1637,18 @@ function setShareCursor(enabled) {
     el.btnShareCursorLabel.textContent = state.shareCursor ? "Cursor: ON" : "Show My Cursor";
     if (!state.shareCursor) {
         hideObserverCursor();
-    } else if (state.observerCursorGraphPos) {
-        sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
+    } else {
+        if (!state.observerCursorGraphPos) {
+            const rect = el.canvas.getBoundingClientRect();
+            const cx = (rect.width / 2 - state.camera.x) / state.camera.scale;
+            const cy = (rect.height / 2 - state.camera.y) / state.camera.scale;
+            if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                state.observerCursorGraphPos = { x: cx, y: cy };
+            }
+        }
+        if (state.observerCursorGraphPos) {
+            sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
+        }
     }
     requestRender();
 }
@@ -1740,6 +1795,9 @@ function handleWsMessage(msg) {
             sendWsSubscribe();
         } else if (type === "init" && state.selectedUserId) {
             sendWsSubscribe();
+            if (state.shareCursor && state.observerCursorGraphPos) {
+                sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
+            }
         }
 
         renderUsersSidebar();
@@ -1968,10 +2026,8 @@ function bindCanvasInteractions() {
         }
     });
 
-    el.canvas.addEventListener("pointerleave", () => {
-        hideObserverCursor();
-        if (state.shareCursor) requestRender();
-    });
+    // Keep the shared cursor visible at the last pointed position when leaving the canvas;
+    // it hides explicitly when the user toggles Cursor: ON off, switches target, or disconnects.
 
     const endDrag = (e) => {
         if (!dragging) return;

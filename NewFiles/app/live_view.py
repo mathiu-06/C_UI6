@@ -892,6 +892,7 @@ class LiveViewManager:
 
     async def _clear_observer_cursor(self, sub: dict) -> None:
         target = sub.get("cursor_target")
+        sub["last_cursor"] = None
         if not target:
             return
         sub["cursor_target"] = None
@@ -913,7 +914,7 @@ class LiveViewManager:
             content_type = "application/javascript; charset=utf-8" if filename.endswith(".js") else "text/css; charset=utf-8"
             response = web.FileResponse(path, headers={
                 "Content-Type": content_type,
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-store, must-revalidate",
                 "X-Content-Type-Options": "nosniff",
             })
             return response
@@ -922,7 +923,7 @@ class LiveViewManager:
             path = os.path.join(ASSETS_DIR, "reporter.js")
             return web.FileResponse(path, headers={
                 "Content-Type": "application/javascript; charset=utf-8",
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-store, must-revalidate",
                 "X-Content-Type-Options": "nosniff",
             })
 
@@ -991,6 +992,7 @@ class LiveViewManager:
                 "user_id": None,
                 "session_id": None,
                 "cursor_target": None,
+                "last_cursor": None,
             }
             self.observers[ws] = sub
 
@@ -1070,6 +1072,7 @@ class LiveViewManager:
                         if sub["cursor_target"] and sub["cursor_target"] != new_target:
                             await self._clear_observer_cursor(sub)
                         sub["cursor_target"] = new_target
+                        sub["last_cursor"] = cursor
                         await self._send_observer_cursor(observer_id, target_uid, target_sid, cursor)
             finally:
                 await self._clear_observer_cursor(sub)
@@ -1170,6 +1173,7 @@ class LiveViewManager:
 
                     session_id = new_session_id
                     user_id = resolved_user
+                    is_fresh_socket = self.session_sockets.get(session_id) is not ws
                     self.session_sockets[session_id] = ws
                     if client_id is not None:
                         _set_bounded(self.client_to_user, client_id, resolved_user, MAX_CLIENT_MAP)
@@ -1225,6 +1229,16 @@ class LiveViewManager:
                             viewport=viewport,
                             updated_at=now,
                         )
+
+                    if is_fresh_socket and self.observers:
+                        for obs_sub in list(self.observers.values()):
+                            ct = obs_sub.get("cursor_target")
+                            lc = obs_sub.get("last_cursor")
+                            if ct and lc and ct[0] == resolved_user and (ct[1] is None or ct[1] == session_id):
+                                await self._send_observer_json(ws, {
+                                    "type": "observer_cursor",
+                                    "data": {"observer_id": obs_sub["observer_id"], **lc},
+                                })
 
                     if self.observers:
                         await self._broadcast_observers(
