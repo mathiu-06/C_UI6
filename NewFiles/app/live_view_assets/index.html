@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ComfyUI Live View (Read-Only)</title>
+    <link rel="stylesheet" href="/live-view/assets/viewer.css">
+</head>
+<body>
+    <div id="auth-overlay" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+        <form id="auth-form" class="auth-card">
+            <div class="auth-icon" aria-hidden="true">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+            </div>
+            <h1 id="auth-title">ComfyUI Live View</h1>
+            <p class="auth-subtitle">Enter the live-view token to watch user workflows in read-only mode.</p>
+            <input
+                id="auth-token-input"
+                type="password"
+                autocomplete="current-password"
+                placeholder="Live view token"
+                required
+            >
+            <div id="auth-error" class="auth-error hidden"></div>
+            <button type="submit" class="btn btn-primary auth-submit">Unlock Read-Only Monitor</button>
+        </form>
+    </div>
+
+    <div class="app-shell">
+        <header class="topbar">
+            <div class="topbar-left">
+                <button id="btn-toggle-sidebar" class="btn btn-icon" title="Toggle Users Panel" aria-label="Toggle Users Panel">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="3" y1="6" x2="21" y2="6"></line>
+                        <line x1="3" y1="12" x2="21" y2="12"></line>
+                        <line x1="3" y1="18" x2="21" y2="18"></line>
+                    </svg>
+                </button>
+                <div class="brand">
+                    <span class="brand-dot" id="conn-dot"></span>
+                    <span class="brand-title">ComfyUI Live View</span>
+                </div>
+                <span class="badge badge-readonly" title="Strictly view-only mode. Editing and execution are disabled.">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                        <circle cx="12" cy="12" r="3"></circle>
+                    </svg>
+                    View Only
+                </span>
+                <span id="conn-label" class="conn-label">Connecting...</span>
+            </div>
+
+            <div class="topbar-center">
+                <div class="segmented" role="group" aria-label="View Mode">
+                    <button id="btn-mode-focus" class="seg-btn active" type="button">Focus</button>
+                    <button id="btn-mode-grid" class="seg-btn" type="button">All Users Grid</button>
+                </div>
+
+                <div id="focus-controls" class="focus-controls">
+                    <select id="tab-select" class="select-compact hidden" title="Active browser tabs for this user"></select>
+                    <div class="search-box">
+                        <input id="node-search" type="search" placeholder="Find node..." autocomplete="off">
+                    </div>
+                    <button id="btn-follow" class="btn" type="button" title="Follow user's camera pan and zoom">Follow Camera</button>
+                    <button id="btn-fit" class="btn" type="button" title="Fit workflow in view (F)">Fit</button>
+                    <div class="zoom-group">
+                        <button id="btn-zoom-out" class="btn btn-icon" type="button" title="Zoom out">-</button>
+                        <span id="zoom-label" class="zoom-label">100%</span>
+                        <button id="btn-zoom-in" class="btn btn-icon" type="button" title="Zoom in">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="topbar-right">
+                <span id="queue-badge" class="badge badge-neutral">Queue: 0</span>
+                <button id="btn-toggle-inspector" class="btn" type="button" title="Toggle Read-Only Node Inspector">Inspector</button>
+                <button id="btn-logout" class="btn hidden" type="button" title="Lock Live View">Lock</button>
+            </div>
+        </header>
+
+        <div class="workspace">
+            <aside id="sidebar" class="sidebar">
+                <div class="sidebar-header">
+                    <div class="sidebar-title-row">
+                        <h2>Users</h2>
+                        <span id="users-count" class="count-pill">0</span>
+                    </div>
+                    <input id="user-filter" class="sidebar-search" type="search" placeholder="Filter users..." autocomplete="off">
+                </div>
+                <div id="users-list" class="users-list"></div>
+
+                <div id="saved-section" class="saved-section hidden">
+                    <div class="sidebar-title-row saved-header">
+                        <h3>Saved Workflows</h3>
+                        <button id="btn-refresh-saved" class="btn-link" type="button" title="Refresh saved workflows">Refresh</button>
+                    </div>
+                    <div id="saved-list" class="saved-list"></div>
+                </div>
+            </aside>
+
+            <main class="stage">
+                <div id="saved-banner" class="saved-banner hidden">
+                    <span id="saved-banner-text">Viewing saved workflow (Read-Only)</span>
+                    <button id="btn-back-live" class="btn btn-primary btn-sm" type="button">Return to Live View</button>
+                </div>
+
+                <div id="active-user-bar" class="active-user-bar hidden">
+                    <div class="active-user-meta">
+                        <span id="active-status-dot" class="status-dot"></span>
+                        <strong id="active-username">-</strong>
+                        <span class="sep">/</span>
+                        <span id="active-workflow-name" class="workflow-name">No workflow</span>
+                        <span id="active-counts" class="muted-meta"></span>
+                    </div>
+                    <div id="active-exec-meta" class="active-exec-meta"></div>
+                </div>
+
+                <div id="focus-stage" class="focus-stage">
+                    <canvas id="graph-canvas"></canvas>
+                    <div id="empty-state" class="empty-state">
+                        <div class="empty-card">
+                            <h3 id="empty-title">Waiting for user workflows</h3>
+                            <p id="empty-desc">Select a user from the left panel or wait for someone to open ComfyUI. Live workflow changes appear here automatically in read-only mode.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="grid-stage" class="grid-stage hidden">
+                    <div id="grid-container" class="grid-container"></div>
+                </div>
+            </main>
+
+            <aside id="inspector" class="inspector">
+                <div class="inspector-header">
+                    <h2 id="inspector-title">Overview</h2>
+                    <button id="btn-close-inspector" class="btn btn-icon" type="button" title="Close Inspector">&times;</button>
+                </div>
+                <div id="inspector-body" class="inspector-body"></div>
+            </aside>
+        </div>
+    </div>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+        <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close preview">&times;</button>
+        <img id="lightbox-img" alt="Output preview">
+        <div id="lightbox-caption" class="lightbox-caption"></div>
+    </div>
+
+    <script type="module" src="/live-view/assets/viewer.js"></script>
+</body>
+</html>
