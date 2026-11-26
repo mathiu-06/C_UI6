@@ -871,28 +871,36 @@ class LiveViewManager:
         user_id: str,
         session_id: Optional[str],
         cursor: dict,
-    ) -> None:
-        targets: list[tuple[str, web.WebSocketResponse]] = []
+    ) -> tuple[int, bool]:
+        targets: list[tuple[str, web.WebSocketResponse, int]] = []
         if session_id and session_id in self.session_sockets:
             sess = self.sessions.get(session_id)
             if sess and sess["user_id"] == user_id:
-                targets.append((session_id, self.session_sockets[session_id]))
+                targets.append((session_id, self.session_sockets[session_id], sess.get("reporter_version", 1)))
         if not targets:
             for sid, sess in list(self.sessions.items()):
                 if sess["user_id"] == user_id and sid in self.session_sockets:
-                    targets.append((sid, self.session_sockets[sid]))
+                    targets.append((sid, self.session_sockets[sid], sess.get("reporter_version", 1)))
 
         if not targets:
-            return
+            return 0, False
         payload = {"type": "observer_cursor", "data": {"observer_id": observer_id, **cursor}}
-        for sid, target_ws in targets:
+        delivered = 0
+        supports_cursor = False
+        for sid, target_ws, rep_ver in targets:
             ok = await self._send_observer_json(target_ws, payload)
-            if not ok and self.session_sockets.get(sid) is target_ws:
+            if ok:
+                delivered += 1
+                if rep_ver >= 4:
+                    supports_cursor = True
+            elif self.session_sockets.get(sid) is target_ws:
                 self.session_sockets.pop(sid, None)
+        return delivered, supports_cursor
 
     async def _clear_observer_cursor(self, sub: dict) -> None:
         target = sub.get("cursor_target")
         sub["last_cursor"] = None
+        sub["last_cursor_status"] = None
         if not target:
             return
         sub["cursor_target"] = None
@@ -1073,7 +1081,18 @@ class LiveViewManager:
                             await self._clear_observer_cursor(sub)
                         sub["cursor_target"] = new_target
                         sub["last_cursor"] = cursor
-                        await self._send_observer_cursor(observer_id, target_uid, target_sid, cursor)
+                        delivered, supports_cursor = await self._send_observer_cursor(observer_id, target_uid, target_sid, cursor)
+                        status_key = (target_uid, delivered, supports_cursor)
+                        if sub.get("last_cursor_status") != status_key:
+                            sub["last_cursor_status"] = status_key
+                            await self._send_observer_json(ws, {
+                                "type": "cursor_status",
+                                "data": {
+                                    "user_id": target_uid,
+                                    "delivered": delivered,
+                                    "supports_cursor": supports_cursor,
+                                },
+                            })
             finally:
                 await self._clear_observer_cursor(sub)
                 self.observers.pop(ws, None)
@@ -1201,12 +1220,18 @@ class LiveViewManager:
                         or existing["link_count"] != link_count
                     )
 
+                    raw_rep_ver = payload.get("reporter_version")
+                    reporter_version = int(raw_rep_ver) if isinstance(raw_rep_ver, int) else (
+                        existing.get("reporter_version", 1) if existing else 1
+                    )
+
                     session_record = {
                         "session_id": session_id,
                         "user_id": resolved_user,
                         "username": self._get_username(resolved_user),
                         "client_id": client_id,
                         "tab_id": tab_id,
+                        "reporter_version": reporter_version,
                         "workflow_name": workflow_name,
                         "workflow": workflow,
                         "node_meta": node_meta,
@@ -1231,14 +1256,25 @@ class LiveViewManager:
                         )
 
                     if is_fresh_socket and self.observers:
-                        for obs_sub in list(self.observers.values()):
+                        for obs_ws, obs_sub in list(self.observers.items()):
                             ct = obs_sub.get("cursor_target")
                             lc = obs_sub.get("last_cursor")
                             if ct and lc and ct[0] == resolved_user and (ct[1] is None or ct[1] == session_id):
-                                await self._send_observer_json(ws, {
+                                ok = await self._send_observer_json(ws, {
                                     "type": "observer_cursor",
                                     "data": {"observer_id": obs_sub["observer_id"], **lc},
                                 })
+                                if ok:
+                                    status_key = (resolved_user, 1, reporter_version >= 4)
+                                    obs_sub["last_cursor_status"] = status_key
+                                    await self._send_observer_json(obs_ws, {
+                                        "type": "cursor_status",
+                                        "data": {
+                                            "user_id": resolved_user,
+                                            "delivered": 1,
+                                            "supports_cursor": reporter_version >= 4,
+                                        },
+                                    })
 
                     if self.observers:
                         await self._broadcast_observers(
@@ -1277,6 +1313,20 @@ class LiveViewManager:
                                         snap,
                                         user_id=user_id,
                                     )
+                                remaining_tabs = len(self._get_user_sessions(user_id))
+                                if remaining_tabs == 0:
+                                    for obs_ws, obs_sub in list(self.observers.items()):
+                                        ct = obs_sub.get("cursor_target")
+                                        if ct and ct[0] == user_id:
+                                            obs_sub["last_cursor_status"] = (user_id, 0, False)
+                                            await self._send_observer_json(obs_ws, {
+                                                "type": "cursor_status",
+                                                "data": {
+                                                    "user_id": user_id,
+                                                    "delivered": 0,
+                                                    "supports_cursor": False,
+                                                },
+                                            })
 
             return ws
 

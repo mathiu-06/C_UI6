@@ -53,6 +53,7 @@ const state = {
     selectedNodeId: null,
     followCamera: false,
     shareCursor: false,
+    cursorDelivery: null, // { delivered, supports_cursor }
     observerCursorGraphPos: null,
     lastCursorSentAt: 0,
     cursorCurrentlyShown: false,
@@ -1615,12 +1616,31 @@ function sendObserverCursor(gx, gy, force = false) {
     }
 }
 
+function updateShareCursorButton() {
+    el.btnShareCursor.classList.toggle("cursor-active", state.shareCursor);
+    if (!state.shareCursor) {
+        el.btnShareCursorLabel.textContent = "Show My Cursor";
+        return;
+    }
+    const info = state.cursorDelivery;
+    if (!info) {
+        el.btnShareCursorLabel.textContent = "Cursor: ON";
+    } else if (info.delivered > 0 && info.supports_cursor) {
+        el.btnShareCursorLabel.textContent = "Cursor: ON (Live)";
+    } else if (info.delivered > 0 && !info.supports_cursor) {
+        el.btnShareCursorLabel.textContent = "Cursor: ON (Refresh User Tab)";
+    } else {
+        el.btnShareCursorLabel.textContent = "Cursor: ON (User Offline)";
+    }
+}
+
 function hideObserverCursor() {
     if (trailingCursorTimer) {
         clearTimeout(trailingCursorTimer);
         trailingCursorTimer = null;
     }
     state.observerCursorGraphPos = null;
+    state.cursorDelivery = null;
     if (state.cursorCurrentlyShown && state.ws && state.ws.readyState === WebSocket.OPEN) {
         try {
             state.ws.send('{"type":"cursor","visible":false}');
@@ -1629,26 +1649,33 @@ function hideObserverCursor() {
         }
     }
     state.cursorCurrentlyShown = false;
+    updateShareCursorButton();
+}
+
+function placeAndSendCursorForCurrentView() {
+    if (!state.shareCursor || state.mode !== "focus" || state.viewingSavedPath || !state.selectedUserId) {
+        return;
+    }
+    if (!state.observerCursorGraphPos) {
+        const rect = el.canvas.getBoundingClientRect();
+        const cx = (rect.width / 2 - state.camera.x) / state.camera.scale;
+        const cy = (rect.height / 2 - state.camera.y) / state.camera.scale;
+        if (Number.isFinite(cx) && Number.isFinite(cy)) {
+            state.observerCursorGraphPos = { x: cx, y: cy };
+        }
+    }
+    if (state.observerCursorGraphPos) {
+        sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
+    }
 }
 
 function setShareCursor(enabled) {
     state.shareCursor = Boolean(enabled);
-    el.btnShareCursor.classList.toggle("cursor-active", state.shareCursor);
-    el.btnShareCursorLabel.textContent = state.shareCursor ? "Cursor: ON" : "Show My Cursor";
     if (!state.shareCursor) {
         hideObserverCursor();
     } else {
-        if (!state.observerCursorGraphPos) {
-            const rect = el.canvas.getBoundingClientRect();
-            const cx = (rect.width / 2 - state.camera.x) / state.camera.scale;
-            const cy = (rect.height / 2 - state.camera.y) / state.camera.scale;
-            if (Number.isFinite(cx) && Number.isFinite(cy)) {
-                state.observerCursorGraphPos = { x: cx, y: cy };
-            }
-        }
-        if (state.observerCursorGraphPos) {
-            sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
-        }
+        updateShareCursorButton();
+        placeAndSendCursorForCurrentView();
     }
     requestRender();
 }
@@ -1724,6 +1751,9 @@ function selectUser(userId, sessionId = null) {
     } else {
         requestRender();
     }
+    if (state.shareCursor) {
+        placeAndSendCursorForCurrentView();
+    }
 }
 
 function setMode(mode, notify = true) {
@@ -1793,10 +1823,13 @@ function handleWsMessage(msg) {
             state.selectedUserId = firstActive.user_id;
             fetchSavedWorkflows(state.selectedUserId);
             sendWsSubscribe();
+            if (state.shareCursor) {
+                placeAndSendCursorForCurrentView();
+            }
         } else if (type === "init" && state.selectedUserId) {
             sendWsSubscribe();
-            if (state.shareCursor && state.observerCursorGraphPos) {
-                sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
+            if (state.shareCursor) {
+                placeAndSendCursorForCurrentView();
             }
         }
 
@@ -1835,6 +1868,14 @@ function handleWsMessage(msg) {
         state.userCursorsByUser.set(data.user_id, data.cursor);
         if (state.mode === "focus" && data.user_id === state.selectedUserId && !state.viewingSavedPath) {
             requestRender();
+        }
+    } else if (type === "cursor_status") {
+        if (data.user_id === state.selectedUserId) {
+            state.cursorDelivery = {
+                delivered: data.delivered || 0,
+                supports_cursor: Boolean(data.supports_cursor),
+            };
+            updateShareCursorButton();
         }
     } else if (type === "execution_update") {
         const existing = state.snapshotsByUser.get(data.user_id) || { user_id: data.user_id };

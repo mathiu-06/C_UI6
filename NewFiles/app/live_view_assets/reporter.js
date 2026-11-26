@@ -1,6 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+const REPORTER_VERSION = 4;
 const STATE_DEBOUNCE_MS = 220;
 const VIEWPORT_MIN_INTERVAL_MS = 100;
 const USER_CURSOR_MIN_INTERVAL_MS = 45;
@@ -78,14 +79,29 @@ function getComfyCanvas() {
 }
 
 function getCanvasElement() {
-    const c = getComfyCanvas()?.canvas;
-    if (c && c.isConnected) return c;
-    return (
-        document.querySelector("canvas#graph-canvas") ||
-        document.querySelector(".graph-canvas-container canvas") ||
-        document.querySelector("canvas") ||
-        null
-    );
+    const comfyCanvas = getComfyCanvas();
+    const direct = comfyCanvas?.canvas || comfyCanvas?.bgcanvas;
+    if (direct && direct.isConnected) {
+        const r = direct.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) return direct;
+    }
+    const byId = document.querySelector("canvas#graph-canvas");
+    if (byId) return byId;
+    const inContainer = document.querySelector(".graph-canvas-container canvas");
+    if (inContainer) return inContainer;
+
+    // Pick the largest visible canvas so tiny minimap/widget canvases are never chosen.
+    let best = null;
+    let bestArea = 0;
+    for (const c of document.querySelectorAll("canvas")) {
+        const r = c.getBoundingClientRect();
+        const area = r.width * r.height;
+        if (area > bestArea) {
+            bestArea = area;
+            best = c;
+        }
+    }
+    return best;
 }
 
 function getViewport() {
@@ -358,6 +374,7 @@ function createObserverCursorRenderer() {
         if (!layer) {
             layer = document.createElement("div");
             layer.id = "comfy-live-view-cursor-layer";
+            layer.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647;overflow:hidden;";
         }
         if (!layer.isConnected && document.body) {
             document.body.appendChild(layer);
@@ -402,8 +419,9 @@ function createObserverCursorRenderer() {
         if (cursors.size === 0) return;
 
         getLayer();
+        const comfyCanvas = getComfyCanvas();
         const canvasEl = getCanvasElement();
-        const ds = getComfyCanvas()?.ds;
+        const ds = comfyCanvas?.ds;
         if (!canvasEl || !ds || typeof ds.scale !== "number" || ds.scale <= 0 || !ds.offset) {
             rafId = requestAnimationFrame(renderFrame);
             return;
@@ -422,8 +440,24 @@ function createObserverCursorRenderer() {
 
         for (const entry of cursors.values()) {
             // Exact LiteGraph world -> canvas CSS pixel transform.
-            const sx = (entry.x + ds.offset[0]) * ds.scale;
-            const sy = (entry.y + ds.offset[1]) * ds.scale;
+            let sx = (entry.x + ds.offset[0]) * ds.scale;
+            let sy = (entry.y + ds.offset[1]) * ds.scale;
+            if (typeof ds.convertOffsetToCanvas === "function") {
+                try {
+                    const converted = ds.convertOffsetToCanvas([entry.x, entry.y]);
+                    if (
+                        converted &&
+                        converted.length >= 2 &&
+                        Number.isFinite(converted[0]) &&
+                        Number.isFinite(converted[1])
+                    ) {
+                        sx = converted[0];
+                        sy = converted[1];
+                    }
+                } catch {
+                    // Keep formula fallback.
+                }
+            }
             const isInside = sx >= 0 && sx <= rect.width && sy >= 0 && sy <= rect.height;
 
             if (isInside) {
@@ -532,6 +566,7 @@ app.registerExtension({
 
             return {
                 type: "state",
+                reporter_version: REPORTER_VERSION,
                 user_id: getUserId(),
                 client_id: getClientId(),
                 tab_id: tabId,

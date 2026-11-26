@@ -239,20 +239,22 @@ class TestCursorRelayAndCoordinates:
 
             alice_ws = FakeWebSocket()
             bob_ws = FakeWebSocket()
-            mgr.sessions["alice_1:tab1"] = {"session_id": "alice_1:tab1", "user_id": "alice_1"}
-            mgr.sessions["bob_2:tab1"] = {"session_id": "bob_2:tab1", "user_id": "bob_2"}
+            mgr.sessions["alice_1:tab1"] = {"session_id": "alice_1:tab1", "user_id": "alice_1", "reporter_version": 4}
+            mgr.sessions["bob_2:tab1"] = {"session_id": "bob_2:tab1", "user_id": "bob_2", "reporter_version": 4}
             mgr.session_sockets["alice_1:tab1"] = alice_ws
             mgr.session_sockets["bob_2:tab1"] = bob_ws
 
             sub = {"observer_id": "obs_1", "cursor_target": ("alice_1", "alice_1:tab1")}
 
             async def run_cursor():
-                await mgr._send_observer_cursor(
+                delivered, supports = await mgr._send_observer_cursor(
                     "obs_1",
                     "alice_1",
                     "alice_1:tab1",
                     {"visible": True, "x": 660.0, "y": 320.0},
                 )
+                assert delivered == 1
+                assert supports is True
                 await mgr._clear_observer_cursor(sub)
 
             asyncio.run(run_cursor())
