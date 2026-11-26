@@ -2,10 +2,12 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const STATE_DEBOUNCE_MS = 220;
-const VIEWPORT_MIN_INTERVAL_MS = 120;
+const VIEWPORT_MIN_INTERVAL_MS = 100;
+const USER_CURSOR_MIN_INTERVAL_MS = 45;
 const POLL_INTERVAL_MS = 900;
 const HEARTBEAT_INTERVAL_MS = 15000;
 const MAX_WIDGET_STRING_LEN = 4000;
+const EDGE_INDICATOR_PAD = 26;
 
 function getTabId() {
     const key = "Comfy.liveViewTabId";
@@ -71,22 +73,61 @@ function getWorkflowName() {
     return "Unsaved Workflow";
 }
 
+function getCanvasElement() {
+    return app.canvas?.canvas || document.querySelector("canvas#graph-canvas") || null;
+}
+
 function getViewport() {
     try {
         const ds = app.canvas?.ds;
         if (ds && typeof ds.scale === "number" && ds.offset && ds.offset.length >= 2) {
-            return {
+            const vp = {
                 scale: Math.round(ds.scale * 1000) / 1000,
                 offset: [
                     Math.round(ds.offset[0] * 10) / 10,
                     Math.round(ds.offset[1] * 10) / 10,
                 ],
             };
+            const canvasEl = getCanvasElement();
+            if (canvasEl) {
+                const rect = canvasEl.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    vp.width = Math.round(rect.width);
+                    vp.height = Math.round(rect.height);
+                }
+            }
+            return vp;
         }
     } catch {
         // Ignore missing canvas state.
     }
     return null;
+}
+
+function clientToGraphCoords(clientX, clientY) {
+    try {
+        const ds = app.canvas?.ds;
+        const canvasEl = getCanvasElement();
+        if (!ds || !canvasEl || typeof ds.scale !== "number" || ds.scale <= 0) return null;
+        const rect = canvasEl.getBoundingClientRect();
+        if (
+            clientX < rect.left ||
+            clientX > rect.right ||
+            clientY < rect.top ||
+            clientY > rect.bottom
+        ) {
+            return null;
+        }
+        const gx = (clientX - rect.left) / ds.scale - ds.offset[0];
+        const gy = (clientY - rect.top) / ds.scale - ds.offset[1];
+        if (!Number.isFinite(gx) || !Number.isFinite(gy)) return null;
+        return {
+            x: Math.round(gx * 10) / 10,
+            y: Math.round(gy * 10) / 10,
+        };
+    } catch {
+        return null;
+    }
 }
 
 function safeWidgetValue(value) {
@@ -172,11 +213,280 @@ function getReportWsUrl() {
     return httpUrl.toString();
 }
 
+function ensureObserverOverlayStyles() {
+    if (document.getElementById("comfy-live-view-cursor-styles")) return;
+    const style = document.createElement("style");
+    style.id = "comfy-live-view-cursor-styles";
+    style.textContent = `
+        #comfy-live-view-cursor-layer {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 99999;
+            overflow: hidden;
+        }
+        .clv-cursor {
+            position: fixed;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            will-change: transform;
+            display: none;
+        }
+        .clv-cursor-svg {
+            display: block;
+            filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55));
+        }
+        .clv-cursor-tag {
+            position: absolute;
+            top: 19px;
+            left: 15px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.92);
+            border: 1px solid #ff6b2b;
+            color: #fff7ed;
+            font: 600 11px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            white-space: nowrap;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+        }
+        .clv-offscreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 0;
+            height: 0;
+            pointer-events: none;
+            will-change: transform;
+            display: none;
+        }
+        .clv-beacon-wrap {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform: translate(-50%, -50%);
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .clv-beacon-ring {
+            position: absolute;
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            border: 2px solid #ff6b2b;
+            animation: clvBeaconRipple 1.1s ease-out infinite;
+        }
+        .clv-beacon-led {
+            position: relative;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ff6b2b;
+            border: 2px solid #fff7ed;
+            box-shadow: 0 0 12px 3px rgba(255, 107, 43, 0.95);
+            animation: clvBeaconBlink 0.75s ease-in-out infinite;
+        }
+        .clv-beacon-arrow {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 34px;
+            height: 34px;
+            margin-top: -17px;
+            margin-left: -17px;
+            will-change: transform;
+        }
+        .clv-beacon-arrow::after {
+            content: "";
+            position: absolute;
+            right: -7px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 0;
+            height: 0;
+            border-top: 6px solid transparent;
+            border-bottom: 6px solid transparent;
+            border-left: 10px solid #ff6b2b;
+            filter: drop-shadow(0 0 4px rgba(255, 107, 43, 0.9));
+        }
+        @keyframes clvBeaconBlink {
+            0%, 100% {
+                opacity: 1;
+                transform: scale(1.12);
+                box-shadow: 0 0 14px 4px rgba(255, 107, 43, 0.98);
+            }
+            50% {
+                opacity: 0.25;
+                transform: scale(0.82);
+                box-shadow: 0 0 3px 1px rgba(255, 107, 43, 0.35);
+            }
+        }
+        @keyframes clvBeaconRipple {
+            0% {
+                opacity: 0.9;
+                transform: scale(0.55);
+            }
+            100% {
+                opacity: 0;
+                transform: scale(1.75);
+            }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+function createObserverCursorRenderer() {
+    ensureObserverOverlayStyles();
+    let layer = document.getElementById("comfy-live-view-cursor-layer");
+    if (!layer) {
+        layer = document.createElement("div");
+        layer.id = "comfy-live-view-cursor-layer";
+        document.body.appendChild(layer);
+    }
+
+    const cursors = new Map(); // observer_id -> { x, y, cursorEl, offscreenEl, arrowEl }
+    let rafId = null;
+
+    function createEntryElements() {
+        const cursorEl = document.createElement("div");
+        cursorEl.className = "clv-cursor";
+        cursorEl.innerHTML = `
+            <svg class="clv-cursor-svg" width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <path d="M3.5 2.5L10.4 20.5L13.1 13.6L20 10.9L3.5 2.5Z" fill="#ff6b2b" stroke="#0f172a" stroke-width="2" stroke-linejoin="round"/>
+                <path d="M4.6 4.2L10.3 18.6L12.5 13L18.1 10.8L4.6 4.2Z" fill="none" stroke="#fff7ed" stroke-width="0.9" stroke-linejoin="round"/>
+            </svg>
+            <span class="clv-cursor-tag">Live View</span>
+        `;
+
+        const offscreenEl = document.createElement("div");
+        offscreenEl.className = "clv-offscreen";
+        const wrap = document.createElement("div");
+        wrap.className = "clv-beacon-wrap";
+        const ring = document.createElement("div");
+        ring.className = "clv-beacon-ring";
+        const led = document.createElement("div");
+        led.className = "clv-beacon-led";
+        const arrowEl = document.createElement("div");
+        arrowEl.className = "clv-beacon-arrow";
+        wrap.append(ring, arrowEl, led);
+        offscreenEl.appendChild(wrap);
+
+        layer.append(cursorEl, offscreenEl);
+        return { cursorEl, offscreenEl, arrowEl };
+    }
+
+    function renderFrame() {
+        rafId = null;
+        if (cursors.size === 0) return;
+
+        const canvasEl = getCanvasElement();
+        const ds = app.canvas?.ds;
+        if (!canvasEl || !ds || typeof ds.scale !== "number" || !ds.offset) {
+            rafId = requestAnimationFrame(renderFrame);
+            return;
+        }
+
+        const rect = canvasEl.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+            rafId = requestAnimationFrame(renderFrame);
+            return;
+        }
+
+        const cx = rect.width / 2;
+        const cy = rect.height / 2;
+        const hw = Math.max(12, cx - EDGE_INDICATOR_PAD);
+        const hh = Math.max(12, cy - EDGE_INDICATOR_PAD);
+
+        for (const entry of cursors.values()) {
+            // Exact LiteGraph world -> canvas CSS pixel transform.
+            const sx = (entry.x + ds.offset[0]) * ds.scale;
+            const sy = (entry.y + ds.offset[1]) * ds.scale;
+            const isInside = sx >= 0 && sx <= rect.width && sy >= 0 && sy <= rect.height;
+
+            if (isInside) {
+                entry.offscreenEl.style.display = "none";
+                entry.cursorEl.style.display = "block";
+                entry.cursorEl.style.transform = `translate3d(${rect.left + sx}px, ${rect.top + sy}px, 0)`;
+            } else {
+                entry.cursorEl.style.display = "none";
+                entry.offscreenEl.style.display = "block";
+
+                const dx = sx - cx;
+                const dy = sy - cy;
+                const tx = Math.abs(dx) > 1e-4 ? hw / Math.abs(dx) : Infinity;
+                const ty = Math.abs(dy) > 1e-4 ? hh / Math.abs(dy) : Infinity;
+                const t = Math.min(tx, ty);
+                const edgeX = rect.left + cx + dx * t;
+                const edgeY = rect.top + cy + dy * t;
+                const angleDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
+
+                entry.offscreenEl.style.transform = `translate3d(${edgeX}px, ${edgeY}px, 0)`;
+                entry.arrowEl.style.transform = `rotate(${angleDeg}deg)`;
+            }
+        }
+
+        rafId = requestAnimationFrame(renderFrame);
+    }
+
+    function ensureLoop() {
+        if (rafId === null && cursors.size > 0) {
+            rafId = requestAnimationFrame(renderFrame);
+        }
+    }
+
+    function update(data) {
+        if (!data || typeof data.observer_id !== "string") return;
+        const id = data.observer_id;
+        if (!data.visible || typeof data.x !== "number" || typeof data.y !== "number") {
+            const existing = cursors.get(id);
+            if (existing) {
+                existing.cursorEl.remove();
+                existing.offscreenEl.remove();
+                cursors.delete(id);
+            }
+            if (cursors.size === 0 && rafId !== null) {
+                cancelAnimationFrame(rafId);
+                rafId = null;
+            }
+            return;
+        }
+
+        let entry = cursors.get(id);
+        if (!entry) {
+            const els = createEntryElements();
+            entry = { x: data.x, y: data.y, ...els };
+            cursors.set(id, entry);
+        } else {
+            entry.x = data.x;
+            entry.y = data.y;
+        }
+        ensureLoop();
+    }
+
+    function clearAll() {
+        for (const entry of cursors.values()) {
+            entry.cursorEl.remove();
+            entry.offscreenEl.remove();
+        }
+        cursors.clear();
+        if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+    }
+
+    return { update, clearAll };
+}
+
 app.registerExtension({
     name: "Comfy.LiveViewReporter",
     async setup() {
         const tabId = getTabId();
         const wsUrl = getReportWsUrl();
+        const observerOverlay = createObserverCursorRenderer();
 
         let ws = null;
         let reconnectDelay = 1000;
@@ -185,6 +495,8 @@ app.registerExtension({
         let lastSentFingerprint = "";
         let lastViewportKey = "";
         let lastViewportSentAt = 0;
+        let lastUserCursorSentAt = 0;
+        let lastUserCursorVisible = false;
         let hookedGraph = null;
 
         function buildStatePayload() {
@@ -208,6 +520,10 @@ app.registerExtension({
                 node_meta: extractNodeMeta(graph),
                 viewport: getViewport(),
             };
+        }
+
+        function viewportKey(vp) {
+            return `${vp.scale}:${vp.offset[0]}:${vp.offset[1]}:${vp.width || 0}:${vp.height || 0}`;
         }
 
         function sendState(force = false) {
@@ -240,7 +556,7 @@ app.registerExtension({
             lastSentFingerprint = fingerprint;
             const vp = payload.viewport;
             if (vp) {
-                lastViewportKey = `${vp.scale}:${vp.offset[0]}:${vp.offset[1]}`;
+                lastViewportKey = viewportKey(vp);
                 lastViewportSentAt = Date.now();
             }
             try {
@@ -256,12 +572,35 @@ app.registerExtension({
             if (now - lastViewportSentAt < VIEWPORT_MIN_INTERVAL_MS) return;
             const vp = getViewport();
             if (!vp) return;
-            const key = `${vp.scale}:${vp.offset[0]}:${vp.offset[1]}`;
+            const key = viewportKey(vp);
             if (key === lastViewportKey) return;
             lastViewportKey = key;
             lastViewportSentAt = now;
             try {
                 ws.send(JSON.stringify({ type: "viewport", viewport: vp }));
+            } catch {
+                // Ignore send errors.
+            }
+        }
+
+        function sendUserCursor(visible, x = 0, y = 0) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (!visible) {
+                if (!lastUserCursorVisible) return;
+                lastUserCursorVisible = false;
+                try {
+                    ws.send('{"type":"user_cursor","visible":false}');
+                } catch {
+                    // Ignore send errors.
+                }
+                return;
+            }
+            const now = Date.now();
+            if (now - lastUserCursorSentAt < USER_CURSOR_MIN_INTERVAL_MS) return;
+            lastUserCursorSentAt = now;
+            lastUserCursorVisible = true;
+            try {
+                ws.send(JSON.stringify({ type: "user_cursor", visible: true, x, y }));
             } catch {
                 // Ignore send errors.
             }
@@ -323,8 +662,21 @@ app.registerExtension({
                 sendState(true);
             });
 
+            ws.addEventListener("message", (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg && msg.type === "observer_cursor") {
+                        observerOverlay.update(msg.data);
+                    }
+                } catch {
+                    // Ignore malformed messages.
+                }
+            });
+
             ws.addEventListener("close", () => {
                 ws = null;
+                lastUserCursorVisible = false;
+                observerOverlay.clearAll();
                 scheduleReconnect();
             });
 
@@ -351,17 +703,41 @@ app.registerExtension({
         hookLoadGraphData();
         connect();
 
+        // Track user's live mouse cursor in shared graph coordinates.
+        window.addEventListener("pointermove", (e) => {
+            const pt = clientToGraphCoords(e.clientX, e.clientY);
+            if (pt) {
+                sendUserCursor(true, pt.x, pt.y);
+            } else {
+                sendUserCursor(false);
+            }
+            if (e.buttons) {
+                sendViewportIfChanged();
+            }
+        }, { passive: true, capture: true });
+
+        document.addEventListener("mouseleave", () => sendUserCursor(false));
+        window.addEventListener("blur", () => sendUserCursor(false));
+
         // Catch canvas drags, prompt typing, widget edits, and zoom/pan smoothly.
-        window.addEventListener("pointerup", scheduleSend, true);
+        window.addEventListener("pointerup", () => {
+            scheduleSend();
+            sendViewportIfChanged();
+        }, true);
         window.addEventListener("keyup", scheduleSend, true);
         window.addEventListener("change", scheduleSend, true);
         window.addEventListener("input", scheduleSend, true);
         window.addEventListener("wheel", () => {
-            setTimeout(sendViewportIfChanged, 60);
+            setTimeout(sendViewportIfChanged, 50);
         }, { passive: true, capture: true });
+        window.addEventListener("resize", () => {
+            setTimeout(sendViewportIfChanged, 100);
+        }, { passive: true });
 
         document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) {
+            if (document.hidden) {
+                sendUserCursor(false);
+            } else {
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
                     reconnectDelay = 1000;
                     connect();
@@ -372,6 +748,7 @@ app.registerExtension({
         });
 
         window.addEventListener("pagehide", () => {
+            observerOverlay.clearAll();
             try {
                 ws?.close(1000, "pagehide");
             } catch {

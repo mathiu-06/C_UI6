@@ -9,7 +9,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import folder_paths
-from app.live_view import LiveViewManager, redact_cli_argv
+from app.live_view import (
+    LiveViewManager,
+    _sanitize_cursor,
+    _sanitize_viewport,
+    redact_cli_argv,
+)
 
 
 class FakePromptQueue:
@@ -209,3 +214,58 @@ class TestRealTimeExecutionTracking:
             final_snap = mgr.get_user_snapshot("alice_1")
             assert final_snap["execution"]["running"] is False
             assert final_snap["execution"]["outputs"]["9"][0]["filename"] == "out.png"
+
+
+class TestCursorRelayAndCoordinates:
+    def test_sanitize_cursor_and_viewport_dimensions(self):
+        assert _sanitize_cursor({"visible": True, "x": 125.5, "y": -40}) == {
+            "visible": True,
+            "x": 125.5,
+            "y": -40.0,
+        }
+        assert _sanitize_cursor({"visible": False}) == {"visible": False}
+        assert _sanitize_cursor({"visible": True, "x": float("nan"), "y": 10}) is None
+        assert _sanitize_cursor({"visible": True, "x": float("inf"), "y": 10}) is None
+
+        vp = _sanitize_viewport({"scale": 0.9, "offset": [416, 110], "width": 1280, "height": 720})
+        assert vp == {"scale": 0.9, "offset": [416.0, 110.0], "width": 1280.0, "height": 720.0}
+
+    def test_observer_cursor_relays_to_user_and_clears_cleanly(self):
+        server = FakePromptServer({"alice_1": "Alice", "bob_2": "Bob"})
+        with patch("app.live_view.args") as mock_args:
+            mock_args.live_view_token = None
+            mock_args.multi_user = True
+            mgr = LiveViewManager(server)
+
+            alice_ws = FakeWebSocket()
+            bob_ws = FakeWebSocket()
+            mgr.sessions["alice_1:tab1"] = {"session_id": "alice_1:tab1", "user_id": "alice_1"}
+            mgr.sessions["bob_2:tab1"] = {"session_id": "bob_2:tab1", "user_id": "bob_2"}
+            mgr.session_sockets["alice_1:tab1"] = alice_ws
+            mgr.session_sockets["bob_2:tab1"] = bob_ws
+
+            sub = {"observer_id": "obs_1", "cursor_target": ("alice_1", "alice_1:tab1")}
+
+            async def run_cursor():
+                await mgr._send_observer_cursor(
+                    "obs_1",
+                    "alice_1",
+                    "alice_1:tab1",
+                    {"visible": True, "x": 660.0, "y": 320.0},
+                )
+                await mgr._clear_observer_cursor(sub)
+
+            asyncio.run(run_cursor())
+
+            assert len(bob_ws.sent) == 0
+            assert alice_ws.sent == [
+                {
+                    "type": "observer_cursor",
+                    "data": {"observer_id": "obs_1", "visible": True, "x": 660.0, "y": 320.0},
+                },
+                {
+                    "type": "observer_cursor",
+                    "data": {"observer_id": "obs_1", "visible": False},
+                },
+            ]
+            assert sub["cursor_target"] is None

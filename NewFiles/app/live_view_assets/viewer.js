@@ -1,10 +1,11 @@
 // Strictly read-only real-time ComfyUI workflow monitor.
 
 const TOKEN_STORAGE_KEY = "Comfy.liveViewToken";
-const HEADER_HEIGHT = 26;
+const HEADER_HEIGHT = 30;
 const SLOT_HEIGHT = 20;
 const WIDGET_ROW_HEIGHT = 22;
 const NODE_PADDING = 10;
+const CURSOR_SEND_INTERVAL_MS = 32;
 
 const SLOT_TYPE_COLORS = {
     MODEL: "#b39ddb",
@@ -51,11 +52,16 @@ const state = {
 
     selectedNodeId: null,
     followCamera: false,
+    shareCursor: false,
+    observerCursorGraphPos: null,
+    lastCursorSentAt: 0,
+    cursorCurrentlyShown: false,
+    userCursorsByUser: new Map(), // user_id -> { visible, x, y }
     camera: { x: 80, y: 80, scale: 0.85 },
     hasUserFittedCamera: new Set(),
 
     imageCache: new Map(), // url -> { img, status }
-    nodeLayoutCache: new Map(), // nodeId -> { x, y, w, h }
+    nodeLayoutCache: new Map(), // nodeId -> { x, y, topY, w, bodyH, totalH }
 };
 
 // DOM references
@@ -78,6 +84,8 @@ const el = {
 
     tabSelect: document.getElementById("tab-select"),
     nodeSearch: document.getElementById("node-search"),
+    btnShareCursor: document.getElementById("btn-share-cursor"),
+    btnShareCursorLabel: document.getElementById("btn-share-cursor-label"),
     btnFollow: document.getElementById("btn-follow"),
     btnFit: document.getElementById("btn-fit"),
     btnZoomIn: document.getElementById("btn-zoom-in"),
@@ -376,11 +384,10 @@ function computeWorkflowBounds(workflow) {
             const [x, y] = parsePair(node.pos, 0, 0);
             const [w, h] = parsePair(node.size, 220, 120);
             const collapsed = Boolean(node.flags?.collapsed);
-            const effH = collapsed ? HEADER_HEIGHT : Math.max(h, 60);
             minX = Math.min(minX, x);
-            minY = Math.min(minY, y);
+            minY = Math.min(minY, y - HEADER_HEIGHT);
             maxX = Math.max(maxX, x + Math.max(w, 160));
-            maxY = Math.max(maxY, y + effH);
+            maxY = Math.max(maxY, collapsed ? y : y + Math.max(h, 60));
         }
     }
     if (Array.isArray(groups)) {
@@ -396,6 +403,44 @@ function computeWorkflowBounds(workflow) {
         return { minX: 0, minY: 0, maxX: 800, maxY: 600 };
     }
     return { minX, minY, maxX, maxY };
+}
+
+function drawPointerMarker(targetCtx, gx, gy, scale, fillColor, strokeColor, labelText) {
+    const inv = 1 / Math.max(scale, 0.08);
+    targetCtx.save();
+    targetCtx.translate(gx, gy);
+    targetCtx.scale(inv, inv);
+
+    targetCtx.beginPath();
+    targetCtx.moveTo(0, 0);
+    targetCtx.lineTo(5.5, 16.5);
+    targetCtx.lineTo(8.5, 10.8);
+    targetCtx.lineTo(14.8, 8.2);
+    targetCtx.closePath();
+    targetCtx.fillStyle = fillColor;
+    targetCtx.fill();
+    targetCtx.lineWidth = 1.6;
+    targetCtx.strokeStyle = strokeColor;
+    targetCtx.lineJoin = "round";
+    targetCtx.stroke();
+
+    if (labelText) {
+        targetCtx.font = "600 11px -apple-system, BlinkMacSystemFont, sans-serif";
+        const tw = targetCtx.measureText(labelText).width;
+        const px = 13;
+        const py = 14;
+        drawRoundedRect(targetCtx, px, py, tw + 12, 18, 9);
+        targetCtx.fillStyle = "rgba(15, 23, 42, 0.9)";
+        targetCtx.fill();
+        targetCtx.lineWidth = 1;
+        targetCtx.strokeStyle = fillColor;
+        targetCtx.stroke();
+        targetCtx.fillStyle = "#f8fafc";
+        targetCtx.textBaseline = "middle";
+        targetCtx.fillText(labelText, px + 6, py + 9.5);
+    }
+
+    targetCtx.restore();
 }
 
 function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, options = {}) {
@@ -460,7 +505,8 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         }
     }
 
-    // Precompute node boxes and slot anchors
+    // Precompute node boxes and slot anchors matching LiteGraph coordinates
+    // (title bar occupies [y - HEADER_HEIGHT, y]; body occupies [y, y + bodyH]).
     const nodeMap = new Map();
     const layoutMap = new Map();
     if (interactiveLayoutOut) interactiveLayoutOut.clear();
@@ -479,8 +525,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         const textBlockCount = visibleWidgets.filter(
             (w) => typeof w.value === "string" && w.value.length > 48
         ).length;
-        const estimatedContentH =
-            HEADER_HEIGHT +
+        const estimatedBodyH =
             8 +
             slotRows * SLOT_HEIGHT +
             (visibleWidgets.length > 0 ? 6 + visibleWidgets.length * WIDGET_ROW_HEIGHT + textBlockCount * 22 : 0) +
@@ -488,9 +533,11 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             NODE_PADDING;
 
         const w = collapsed ? Math.max(150, Math.min(rawW, 220)) : Math.max(rawW, 175);
-        const h = collapsed ? HEADER_HEIGHT : Math.max(rawH, estimatedContentH);
+        const topY = y - HEADER_HEIGHT;
+        const bodyH = collapsed ? 0 : Math.max(rawH, estimatedBodyH);
+        const totalH = HEADER_HEIGHT + bodyH;
 
-        const rect = { x, y, w, h, collapsed, inputs, outputs, widgets, images };
+        const rect = { x, y, topY, w, bodyH, totalH, collapsed, inputs, outputs, widgets, images };
         nodeMap.set(node.id, node);
         layoutMap.set(node.id, rect);
         if (interactiveLayoutOut) {
@@ -501,15 +548,15 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
     const getInputPos = (nodeId, slotIndex) => {
         const r = layoutMap.get(nodeId);
         if (!r) return null;
-        if (r.collapsed) return [r.x, r.y + HEADER_HEIGHT / 2];
-        return [r.x, r.y + HEADER_HEIGHT + 12 + slotIndex * SLOT_HEIGHT];
+        if (r.collapsed) return [r.x, r.topY + HEADER_HEIGHT / 2];
+        return [r.x, r.y + 10 + slotIndex * SLOT_HEIGHT];
     };
 
     const getOutputPos = (nodeId, slotIndex) => {
         const r = layoutMap.get(nodeId);
         if (!r) return null;
-        if (r.collapsed) return [r.x + r.w, r.y + HEADER_HEIGHT / 2];
-        return [r.x + r.w, r.y + HEADER_HEIGHT + 12 + slotIndex * SLOT_HEIGHT];
+        if (r.collapsed) return [r.x + r.w, r.topY + HEADER_HEIGHT / 2];
+        return [r.x + r.w, r.y + 10 + slotIndex * SLOT_HEIGHT];
     };
 
     // 2. Links
@@ -555,24 +602,24 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         if (isMuted) targetCtx.globalAlpha = 0.55;
 
         // Node body
-        drawRoundedRect(targetCtx, r.x, r.y, r.w, r.h, 8);
+        drawRoundedRect(targetCtx, r.x, r.topY, r.w, r.totalH, 8);
         targetCtx.fillStyle = isBypassed ? "#2d2138" : (node.bgcolor || "#212530");
         targetCtx.fill();
 
         // Header bar
         targetCtx.save();
-        drawRoundedRect(targetCtx, r.x, r.y, r.w, r.h, 8);
+        drawRoundedRect(targetCtx, r.x, r.topY, r.w, r.totalH, 8);
         targetCtx.clip();
         targetCtx.fillStyle = isBypassed
             ? "#5b3278"
             : isMuted
                 ? "#333949"
                 : (node.color || "#2d3343");
-        targetCtx.fillRect(r.x, r.y, r.w, HEADER_HEIGHT);
+        targetCtx.fillRect(r.x, r.topY, r.w, HEADER_HEIGHT);
         targetCtx.restore();
 
         // Border / execution glow
-        drawRoundedRect(targetCtx, r.x, r.y, r.w, r.h, 8);
+        drawRoundedRect(targetCtx, r.x, r.topY, r.w, r.totalH, 8);
         if (isRunning) {
             targetCtx.lineWidth = 3.2;
             targetCtx.strokeStyle = "#4ade80";
@@ -599,12 +646,12 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             const title = getNodeTitle(node, nodeMeta);
             targetCtx.save();
             targetCtx.beginPath();
-            targetCtx.rect(r.x + 8, r.y, r.w - 38, HEADER_HEIGHT);
+            targetCtx.rect(r.x + 8, r.topY, r.w - 38, HEADER_HEIGHT);
             targetCtx.clip();
             targetCtx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
             targetCtx.fillStyle = "#eef2fa";
             targetCtx.textBaseline = "middle";
-            targetCtx.fillText(title, r.x + 10, r.y + HEADER_HEIGHT / 2 + 0.5);
+            targetCtx.fillText(title, r.x + 10, r.topY + HEADER_HEIGHT / 2 + 0.5);
             targetCtx.restore();
 
             if (!mini) {
@@ -613,17 +660,16 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
                 targetCtx.textAlign = "right";
                 targetCtx.textBaseline = "middle";
                 const tag = isBypassed ? "BYP" : isMuted ? "MUTE" : `#${node.id}`;
-                targetCtx.fillText(tag, r.x + r.w - 8, r.y + HEADER_HEIGHT / 2 + 0.5);
+                targetCtx.fillText(tag, r.x + r.w - 8, r.topY + HEADER_HEIGHT / 2 + 0.5);
                 targetCtx.textAlign = "left";
             }
         }
 
         if (r.collapsed || mini) {
-            // In mini mode draw progress bar if running
             if (mini && isRunning && progress && progress.max > 0) {
                 const pct = Math.max(0, Math.min(1, progress.value / progress.max));
                 targetCtx.fillStyle = "#4ade80";
-                targetCtx.fillRect(r.x, r.y + r.h - 5, r.w * pct, 5);
+                targetCtx.fillRect(r.x, r.topY + r.totalH - 5, r.w * pct, 5);
             }
             targetCtx.restore();
             continue;
@@ -635,7 +681,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
 
         for (let i = 0; i < r.inputs.length; i++) {
             const inp = r.inputs[i];
-            const sy = r.y + HEADER_HEIGHT + 12 + i * SLOT_HEIGHT;
+            const sy = r.y + 10 + i * SLOT_HEIGHT;
             const linked = inp.link !== null && inp.link !== undefined;
             targetCtx.beginPath();
             targetCtx.arc(r.x, sy, 4.5, 0, Math.PI * 2);
@@ -652,7 +698,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         targetCtx.textAlign = "right";
         for (let i = 0; i < r.outputs.length; i++) {
             const out = r.outputs[i];
-            const sy = r.y + HEADER_HEIGHT + 12 + i * SLOT_HEIGHT;
+            const sy = r.y + 10 + i * SLOT_HEIGHT;
             const linked = Array.isArray(out.links) && out.links.length > 0;
             targetCtx.beginPath();
             targetCtx.arc(r.x + r.w, sy, 4.5, 0, Math.PI * 2);
@@ -668,8 +714,8 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         targetCtx.textAlign = "left";
 
         // Widgets
-        let curY = r.y + HEADER_HEIGHT + 8 + Math.max(r.inputs.length, r.outputs.length) * SLOT_HEIGHT + 4;
-        const maxWidgetBottom = r.y + r.h - (r.images.length > 0 ? 132 : 8);
+        let curY = r.y + 8 + Math.max(r.inputs.length, r.outputs.length) * SLOT_HEIGHT + 2;
+        const maxWidgetBottom = r.y + r.bodyH - (r.images.length > 0 ? 132 : 8);
 
         for (const w of r.widgets.slice(0, 12)) {
             const valStr = typeof w.value === "string" ? w.value : "";
@@ -724,7 +770,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
 
         // Inline image preview (latest output or live sampler preview)
         if (r.images.length > 0) {
-            const imgAreaH = Math.max(80, r.y + r.h - curY - 10);
+            const imgAreaH = Math.max(80, r.y + r.bodyH - curY - 10);
             const imgAreaW = r.w - 16;
             if (imgAreaH >= 50) {
                 const entry = getCachedImage(r.images[0]);
@@ -749,12 +795,67 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         if (isRunning && progress && progress.max > 0) {
             const pct = Math.max(0, Math.min(1, progress.value / progress.max));
             targetCtx.fillStyle = "rgba(15, 23, 42, 0.85)";
-            targetCtx.fillRect(r.x + 1, r.y + HEADER_HEIGHT - 3, r.w - 2, 4);
+            targetCtx.fillRect(r.x + 1, r.y - 3, r.w - 2, 4);
             targetCtx.fillStyle = "#4ade80";
-            targetCtx.fillRect(r.x + 1, r.y + HEADER_HEIGHT - 3, (r.w - 2) * pct, 4);
+            targetCtx.fillRect(r.x + 1, r.y - 3, (r.w - 2) * pct, 4);
         }
 
         targetCtx.restore();
+    }
+
+    // 4. User's current screen window boundary (when cursor sharing is active)
+    if (
+        !mini &&
+        state.shareCursor &&
+        !state.viewingSavedPath &&
+        snapshot?.viewport?.width > 0 &&
+        snapshot?.viewport?.height > 0 &&
+        snapshot.viewport.scale > 0 &&
+        Array.isArray(snapshot.viewport.offset)
+    ) {
+        const vp = snapshot.viewport;
+        const winX = -vp.offset[0];
+        const winY = -vp.offset[1];
+        const winW = vp.width / vp.scale;
+        const winH = vp.height / vp.scale;
+        const obs = state.observerCursorGraphPos;
+        const isOutside =
+            obs !== null &&
+            (obs.x < winX || obs.x > winX + winW || obs.y < winY || obs.y > winY + winH);
+
+        const inv = 1 / Math.max(camera.scale, 0.08);
+        targetCtx.save();
+        targetCtx.strokeStyle = isOutside ? "rgba(255, 107, 43, 0.85)" : "rgba(96, 165, 250, 0.55)";
+        targetCtx.lineWidth = 1.6 * inv;
+        targetCtx.setLineDash([7 * inv, 5 * inv]);
+        targetCtx.strokeRect(winX, winY, winW, winH);
+        targetCtx.setLineDash([]);
+
+        targetCtx.font = `600 ${11 * inv}px -apple-system, BlinkMacSystemFont, sans-serif`;
+        targetCtx.fillStyle = isOutside ? "#ff9f6b" : "#93c5fd";
+        targetCtx.textBaseline = "bottom";
+        targetCtx.fillText(
+            isOutside ? "User's Screen (Edge Light Active)" : "User's Screen",
+            winX + 6 * inv,
+            winY - 5 * inv
+        );
+        targetCtx.restore();
+    }
+
+    // 5. Watched user's live mouse cursor in shared graph coordinates
+    if (!mini && !state.viewingSavedPath && snapshot?.user_id) {
+        const userCursor = state.userCursorsByUser.get(snapshot.user_id);
+        if (userCursor && userCursor.visible && typeof userCursor.x === "number" && typeof userCursor.y === "number") {
+            drawPointerMarker(
+                targetCtx,
+                userCursor.x,
+                userCursor.y,
+                camera.scale,
+                "#4ade80",
+                "#0f172a",
+                snapshot.username || "User"
+            );
+        }
     }
 
     targetCtx.restore();
@@ -856,7 +957,7 @@ function centerOnNode(nodeId) {
     el.btnFollow.classList.remove("active");
     state.camera.scale = Math.max(state.camera.scale, 0.75);
     state.camera.x = rect.width / 2 - (r.x + r.w / 2) * state.camera.scale;
-    state.camera.y = rect.height / 2 - (r.y + r.h / 2) * state.camera.scale;
+    state.camera.y = rect.height / 2 - (r.topY + r.totalH / 2) * state.camera.scale;
     state.selectedNodeId = String(nodeId);
     renderInspector();
     requestRender();
@@ -1444,11 +1545,65 @@ async function fetchSavedWorkflows(userId) {
     }
 }
 
+function sendObserverCursor(gx, gy, force = false) {
+    if (
+        !state.shareCursor ||
+        state.mode !== "focus" ||
+        state.viewingSavedPath ||
+        !state.selectedUserId ||
+        !state.ws ||
+        state.ws.readyState !== WebSocket.OPEN
+    ) {
+        return;
+    }
+    const now = Date.now();
+    if (!force && now - state.lastCursorSentAt < CURSOR_SEND_INTERVAL_MS) return;
+    state.lastCursorSentAt = now;
+    state.cursorCurrentlyShown = true;
+    try {
+        state.ws.send(JSON.stringify({
+            type: "cursor",
+            user_id: state.selectedUserId,
+            session_id: state.selectedSessionId,
+            visible: true,
+            x: Math.round(gx * 10) / 10,
+            y: Math.round(gy * 10) / 10,
+        }));
+    } catch {
+        // Ignore send errors.
+    }
+}
+
+function hideObserverCursor() {
+    state.observerCursorGraphPos = null;
+    if (state.cursorCurrentlyShown && state.ws && state.ws.readyState === WebSocket.OPEN) {
+        try {
+            state.ws.send('{"type":"cursor","visible":false}');
+        } catch {
+            // Ignore send errors.
+        }
+    }
+    state.cursorCurrentlyShown = false;
+}
+
+function setShareCursor(enabled) {
+    state.shareCursor = Boolean(enabled);
+    el.btnShareCursor.classList.toggle("cursor-active", state.shareCursor);
+    el.btnShareCursorLabel.textContent = state.shareCursor ? "Cursor: ON" : "Show My Cursor";
+    if (!state.shareCursor) {
+        hideObserverCursor();
+    } else if (state.observerCursorGraphPos) {
+        sendObserverCursor(state.observerCursorGraphPos.x, state.observerCursorGraphPos.y, true);
+    }
+    requestRender();
+}
+
 async function loadSavedWorkflow(userId, relPath) {
     try {
         const encodedPath = relPath.split("/").map(encodeURIComponent).join("/");
         const data = await apiFetchJson(`/live-view/api/users/${encodeURIComponent(userId)}/workflow/${encodedPath}`);
         if (state.selectedUserId !== userId) return;
+        hideObserverCursor();
         state.viewingSavedPath = relPath;
         state.selectedNodeId = null;
         state.followCamera = false;
@@ -1487,6 +1642,9 @@ function returnToLiveView() {
 
 function selectUser(userId, sessionId = null) {
     const changedUser = state.selectedUserId !== userId;
+    if (changedUser || state.selectedSessionId !== sessionId) {
+        hideObserverCursor();
+    }
     state.selectedUserId = userId;
     state.selectedSessionId = sessionId;
     state.viewingSavedPath = null;
@@ -1522,6 +1680,7 @@ function setMode(mode, notify = true) {
     el.gridStage.classList.toggle("hidden", mode !== "grid");
 
     if (mode === "grid") {
+        hideObserverCursor();
         el.activeUserBar.classList.add("hidden");
         el.savedBanner.classList.add("hidden");
         renderGridLayout();
@@ -1605,11 +1764,19 @@ function handleWsMessage(msg) {
             if (
                 state.mode === "focus" &&
                 data.user_id === state.selectedUserId &&
-                !state.viewingSavedPath &&
-                state.followCamera
+                !state.viewingSavedPath
             ) {
-                applyUserViewport(data.viewport);
+                if (state.followCamera) {
+                    applyUserViewport(data.viewport);
+                } else if (state.shareCursor) {
+                    requestRender();
+                }
             }
+        }
+    } else if (type === "user_cursor_update") {
+        state.userCursorsByUser.set(data.user_id, data.cursor);
+        if (state.mode === "focus" && data.user_id === state.selectedUserId && !state.viewingSavedPath) {
+            requestRender();
         }
     } else if (type === "execution_update") {
         const existing = state.snapshotsByUser.get(data.user_id) || { user_id: data.user_id };
@@ -1670,6 +1837,7 @@ function connectObserverWs() {
     ws.addEventListener("close", async (ev) => {
         const wasConnected = state.connected;
         state.connected = false;
+        state.cursorCurrentlyShown = false;
         state.ws = null;
         if (ev.code === 1008 || ev.code === 4401) {
             setConnectionUi("error", "Locked");
@@ -1773,19 +1941,36 @@ function bindCanvasInteractions() {
     });
 
     el.canvas.addEventListener("pointermove", (e) => {
-        if (!dragging) return;
-        const dx = e.clientX - startX;
-        const dy = e.clientY - startY;
-        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-            moved = true;
-            if (state.followCamera) {
-                state.followCamera = false;
-                el.btnFollow.classList.remove("active");
+        if (dragging) {
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                moved = true;
+                if (state.followCamera) {
+                    state.followCamera = false;
+                    el.btnFollow.classList.remove("active");
+                }
+            }
+            state.camera.x = camStartX + dx;
+            state.camera.y = camStartY + dy;
+            requestRender();
+        }
+
+        const rect = el.canvas.getBoundingClientRect();
+        const gx = (e.clientX - rect.left - state.camera.x) / state.camera.scale;
+        const gy = (e.clientY - rect.top - state.camera.y) / state.camera.scale;
+        if (Number.isFinite(gx) && Number.isFinite(gy)) {
+            state.observerCursorGraphPos = { x: gx, y: gy };
+            if (state.shareCursor) {
+                sendObserverCursor(gx, gy);
+                if (!dragging) requestRender();
             }
         }
-        state.camera.x = camStartX + dx;
-        state.camera.y = camStartY + dy;
-        requestRender();
+    });
+
+    el.canvas.addEventListener("pointerleave", () => {
+        hideObserverCursor();
+        if (state.shareCursor) requestRender();
     });
 
     const endDrag = (e) => {
@@ -1799,7 +1984,7 @@ function bindCanvasInteractions() {
             const gy = (e.clientY - rect.top - state.camera.y) / state.camera.scale;
             let hitId = null;
             for (const [nid, box] of state.nodeLayoutCache.entries()) {
-                if (gx >= box.x && gx <= box.x + box.w && gy >= box.y && gy <= box.y + box.h) {
+                if (gx >= box.x && gx <= box.x + box.w && gy >= box.topY && gy <= box.topY + box.totalH) {
                     hitId = nid;
                 }
             }
@@ -1833,6 +2018,12 @@ function bindCanvasInteractions() {
         state.camera.x = mx - (mx - state.camera.x) * ratio;
         state.camera.y = my - (my - state.camera.y) * ratio;
         state.camera.scale = nextScale;
+        if (state.shareCursor) {
+            const gx = (mx - state.camera.x) / state.camera.scale;
+            const gy = (my - state.camera.y) / state.camera.scale;
+            state.observerCursorGraphPos = { x: gx, y: gy };
+            sendObserverCursor(gx, gy, true);
+        }
         requestRender();
     }, { passive: false });
 }
@@ -1906,6 +2097,10 @@ el.btnZoomIn.addEventListener("click", () => zoomByFactor(1.2));
 el.btnZoomOut.addEventListener("click", () => zoomByFactor(1 / 1.2));
 el.btnBackLive.addEventListener("click", returnToLiveView);
 
+el.btnShareCursor.addEventListener("click", () => {
+    setShareCursor(!state.shareCursor);
+});
+
 el.btnFollow.addEventListener("click", () => {
     state.followCamera = !state.followCamera;
     el.btnFollow.classList.toggle("active", state.followCamera);
@@ -1917,6 +2112,7 @@ el.btnFollow.addEventListener("click", () => {
 
 el.tabSelect.addEventListener("change", () => {
     if (!state.selectedUserId) return;
+    hideObserverCursor();
     state.selectedSessionId = el.tabSelect.value || null;
     sendWsSubscribe();
 });
@@ -1951,6 +2147,8 @@ window.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
     if (e.key === "f" || e.key === "F") {
         fitWorkflowInView();
+    } else if (e.key === "c" || e.key === "C") {
+        if (state.mode === "focus") setShareCursor(!state.shareCursor);
     } else if (e.key === "Escape") {
         el.lightbox.classList.add("hidden");
         state.selectedNodeId = null;

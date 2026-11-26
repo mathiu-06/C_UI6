@@ -2,6 +2,7 @@ import base64
 import hmac
 import json
 import logging
+import math
 import os
 import time
 import urllib.parse
@@ -75,13 +76,46 @@ def _sanitize_viewport(viewport: Any) -> Optional[dict]:
         return None
     scale = viewport.get("scale")
     offset = viewport.get("offset")
-    if not isinstance(scale, (int, float)) or scale <= 0:
+    if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
         return None
     if not isinstance(offset, (list, tuple)) or len(offset) < 2:
         return None
-    if not isinstance(offset[0], (int, float)) or not isinstance(offset[1], (int, float)):
+    if (
+        not isinstance(offset[0], (int, float))
+        or not isinstance(offset[1], (int, float))
+        or not math.isfinite(offset[0])
+        or not math.isfinite(offset[1])
+    ):
         return None
-    return {"scale": float(scale), "offset": [float(offset[0]), float(offset[1])]}
+    clean: dict[str, Any] = {"scale": float(scale), "offset": [float(offset[0]), float(offset[1])]}
+    width = viewport.get("width")
+    height = viewport.get("height")
+    if (
+        isinstance(width, (int, float))
+        and isinstance(height, (int, float))
+        and math.isfinite(width)
+        and math.isfinite(height)
+        and width > 0
+        and height > 0
+    ):
+        clean["width"] = float(width)
+        clean["height"] = float(height)
+    return clean
+
+
+def _sanitize_cursor(payload: Any) -> Optional[dict]:
+    if not isinstance(payload, dict):
+        return None
+    visible = bool(payload.get("visible", False))
+    if not visible:
+        return {"visible": False}
+    x = payload.get("x")
+    y = payload.get("y")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return {"visible": True, "x": float(x), "y": float(y)}
 
 
 def _sanitize_node_meta(raw: Any) -> dict:
@@ -180,12 +214,14 @@ class LiveViewManager:
         self.user_manager = prompt_server.user_manager
 
         self.sessions: dict[str, dict] = {}
+        self.session_sockets: dict[str, web.WebSocketResponse] = {}
         self.last_user_snapshots: OrderedDict[str, dict] = OrderedDict()
         self.user_execution: dict[str, dict] = {}
         self.client_to_user: OrderedDict[str, str] = OrderedDict()
         self.prompt_to_user: OrderedDict[str, str] = OrderedDict()
 
         self.observers: dict[web.WebSocketResponse, dict] = {}
+        self._observer_counter: int = 0
         self._last_preview_sent: dict[str, float] = {}
         self._last_progress_sent: dict[str, float] = {}
 
@@ -829,6 +865,39 @@ class LiveViewManager:
             if summary_changed:
                 await self._broadcast_users_summary()
 
+    async def _send_observer_cursor(
+        self,
+        observer_id: str,
+        user_id: str,
+        session_id: Optional[str],
+        cursor: dict,
+    ) -> None:
+        targets: list[tuple[str, web.WebSocketResponse]] = []
+        if session_id and session_id in self.session_sockets:
+            sess = self.sessions.get(session_id)
+            if sess and sess["user_id"] == user_id:
+                targets.append((session_id, self.session_sockets[session_id]))
+        if not targets:
+            for sid, sess in list(self.sessions.items()):
+                if sess["user_id"] == user_id and sid in self.session_sockets:
+                    targets.append((sid, self.session_sockets[sid]))
+
+        if not targets:
+            return
+        payload = {"type": "observer_cursor", "data": {"observer_id": observer_id, **cursor}}
+        for sid, target_ws in targets:
+            ok = await self._send_observer_json(target_ws, payload)
+            if not ok and self.session_sockets.get(sid) is target_ws:
+                self.session_sockets.pop(sid, None)
+
+    async def _clear_observer_cursor(self, sub: dict) -> None:
+        target = sub.get("cursor_target")
+        if not target:
+            return
+        sub["cursor_target"] = None
+        prev_uid, prev_sid = target
+        await self._send_observer_cursor(sub["observer_id"], prev_uid, prev_sid, {"visible": False})
+
     def add_routes(self, app: web.Application) -> None:
         async def serve_index(request: web.Request) -> web.StreamResponse:
             response = web.FileResponse(os.path.join(ASSETS_DIR, "index.html"))
@@ -914,7 +983,15 @@ class LiveViewManager:
 
             ws = web.WebSocketResponse(heartbeat=30.0)
             await ws.prepare(request)
-            sub: dict[str, Any] = {"mode": "focus", "user_id": None, "session_id": None}
+            self._observer_counter += 1
+            observer_id = f"obs_{self._observer_counter}"
+            sub: dict[str, Any] = {
+                "observer_id": observer_id,
+                "mode": "focus",
+                "user_id": None,
+                "session_id": None,
+                "cursor_target": None,
+            }
             self.observers[ws] = sub
 
             try:
@@ -939,10 +1016,12 @@ class LiveViewManager:
                     if not isinstance(payload, dict):
                         continue
 
-                    # Observers are strictly read-only: only view subscription changes are accepted.
-                    if payload.get("type") == "subscribe":
+                    # Observers are strictly read-only: only view subscriptions and visual cursor pointers are accepted.
+                    msg_type = payload.get("type")
+                    if msg_type == "subscribe":
                         mode = payload.get("mode", "focus")
                         if mode == "grid":
+                            await self._clear_observer_cursor(sub)
                             sub["mode"] = "grid"
                             sub["user_id"] = None
                             sub["session_id"] = None
@@ -961,6 +1040,8 @@ class LiveViewManager:
                             target_sid = payload.get("session_id")
                             if not isinstance(target_sid, str):
                                 target_sid = None
+                            if sub["user_id"] != target_uid or sub["session_id"] != target_sid:
+                                await self._clear_observer_cursor(sub)
                             sub["mode"] = "focus"
                             sub["user_id"] = target_uid
                             sub["session_id"] = target_sid
@@ -971,7 +1052,27 @@ class LiveViewManager:
                                         "type": "workflow_snapshot",
                                         "data": snap,
                                     })
+                    elif msg_type == "cursor":
+                        cursor = _sanitize_cursor(payload)
+                        if cursor is None:
+                            continue
+                        if not cursor["visible"]:
+                            await self._clear_observer_cursor(sub)
+                            continue
+                        raw_uid = payload.get("user_id") if isinstance(payload.get("user_id"), str) else sub.get("user_id")
+                        target_uid = self._resolve_valid_user_id(raw_uid)
+                        if target_uid is None:
+                            await self._clear_observer_cursor(sub)
+                            continue
+                        raw_sid = payload.get("session_id")
+                        target_sid = raw_sid if isinstance(raw_sid, str) and raw_sid else sub.get("session_id")
+                        new_target = (target_uid, target_sid)
+                        if sub["cursor_target"] and sub["cursor_target"] != new_target:
+                            await self._clear_observer_cursor(sub)
+                        sub["cursor_target"] = new_target
+                        await self._send_observer_cursor(observer_id, target_uid, target_sid, cursor)
             finally:
+                await self._clear_observer_cursor(sub)
                 self.observers.pop(ws, None)
 
             return ws
@@ -1026,6 +1127,25 @@ class LiveViewManager:
                                     )
                         continue
 
+                    if msg_type == "user_cursor":
+                        if session_id and session_id in self.sessions and user_id:
+                            cursor = _sanitize_cursor(payload)
+                            if cursor is not None:
+                                self.sessions[session_id]["cursor"] = cursor
+                                self.sessions[session_id]["last_seen"] = _now_ms()
+                                if self.observers:
+                                    await self._broadcast_observers(
+                                        "user_cursor_update",
+                                        {
+                                            "user_id": user_id,
+                                            "session_id": session_id,
+                                            "cursor": cursor,
+                                        },
+                                        user_id=user_id,
+                                        session_id=session_id,
+                                    )
+                        continue
+
                     if msg_type != "state":
                         continue
 
@@ -1045,9 +1165,12 @@ class LiveViewManager:
                     new_session_id = f"{resolved_user}:{tab_id}"
                     if session_id and session_id != new_session_id:
                         self.sessions.pop(session_id, None)
+                        if self.session_sockets.get(session_id) is ws:
+                            self.session_sockets.pop(session_id, None)
 
                     session_id = new_session_id
                     user_id = resolved_user
+                    self.session_sockets[session_id] = ws
                     if client_id is not None:
                         _set_bounded(self.client_to_user, client_id, resolved_user, MAX_CLIENT_MAP)
 
@@ -1125,18 +1248,21 @@ class LiveViewManager:
                         if counts_or_name_changed:
                             await self._broadcast_users_summary()
             finally:
-                if session_id and session_id in self.sessions:
-                    self.sessions.pop(session_id, None)
-                    if self.observers:
-                        await self._broadcast_users_summary()
-                        if user_id:
-                            snap = self.get_user_snapshot(user_id)
-                            if snap is not None:
-                                await self._broadcast_observers(
-                                    "workflow_snapshot",
-                                    snap,
-                                    user_id=user_id,
-                                )
+                if session_id:
+                    if self.session_sockets.get(session_id) is ws:
+                        self.session_sockets.pop(session_id, None)
+                    if session_id in self.sessions:
+                        self.sessions.pop(session_id, None)
+                        if self.observers:
+                            await self._broadcast_users_summary()
+                            if user_id:
+                                snap = self.get_user_snapshot(user_id)
+                                if snap is not None:
+                                    await self._broadcast_observers(
+                                        "workflow_snapshot",
+                                        snap,
+                                        user_id=user_id,
+                                    )
 
             return ws
 
