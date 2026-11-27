@@ -120,6 +120,100 @@ class UserManager():
 
         return user_id
 
+    def _reload_users_from_disk(self):
+        if not args.multi_user:
+            return
+        users_file = self.get_users_file()
+        if not os.path.isfile(users_file):
+            return
+        try:
+            with open(users_file, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self.users.update({
+                    k: v for k, v in loaded.items()
+                    if isinstance(k, str)
+                    and isinstance(v, str)
+                    and not k.startswith(folder_paths.SYSTEM_USER_PREFIX)
+                })
+        except (OSError, json.JSONDecodeError) as exc:
+            logging.warning(f"Error reloading users file '{users_file}': {exc}")
+
+    def find_user(self, identifier):
+        if not args.multi_user or not identifier or not isinstance(identifier, str):
+            return None
+        name = parse.unquote(identifier).strip()
+        if not name or name.startswith(folder_paths.SYSTEM_USER_PREFIX):
+            return None
+
+        def _lookup():
+            if name in self.users and not name.startswith(folder_paths.SYSTEM_USER_PREFIX):
+                return name, self.users[name]
+            for uid, uname in self.users.items():
+                if uid.startswith(folder_paths.SYSTEM_USER_PREFIX):
+                    continue
+                if uname == name:
+                    return uid, uname
+            lower = name.lower()
+            for uid, uname in self.users.items():
+                if uid.startswith(folder_paths.SYSTEM_USER_PREFIX):
+                    continue
+                if isinstance(uname, str) and uname.lower() == lower:
+                    return uid, uname
+            return None
+
+        found = _lookup()
+        if found is None:
+            self._reload_users_from_disk()
+            found = _lookup()
+        return found
+
+    def add_direct_login_routes(self, app, web_root):
+        web_root_abs = os.path.abspath(web_root)
+
+        def _safe_js_json(value):
+            return (
+                json.dumps(value)
+                .replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026")
+            )
+
+        async def direct_user_login(request):
+            raw_name = request.match_info.get("username", "")
+
+            # Never shadow real static files in web_root (e.g. favicon.ico, index.html).
+            if raw_name and not request.path.startswith("/u/"):
+                candidate = os.path.abspath(os.path.join(web_root_abs, raw_name))
+                if (
+                    os.path.commonpath((web_root_abs, candidate)) == web_root_abs
+                    and os.path.isfile(candidate)
+                ):
+                    return web.FileResponse(candidate)
+
+            match = self.find_user(raw_name)
+            if match is None:
+                return web.Response(status=404, text="User not found")
+
+            user_id, username = match
+            html = (
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                "<title>ComfyUI</title></head><body><script>"
+                f"localStorage.setItem('Comfy.userId',{_safe_js_json(user_id)});"
+                f"localStorage.setItem('Comfy.userName',{_safe_js_json(username)});"
+                "window.location.replace('/');"
+                "</script></body></html>"
+            )
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                charset="utf-8",
+                headers={"Cache-Control": "no-store, must-revalidate"},
+            )
+
+        app.router.add_get("/u/{username}", direct_user_login)
+        app.router.add_get("/{username}", direct_user_login)
+
     def add_routes(self, routes):
         self.settings.add_routes(routes)
 

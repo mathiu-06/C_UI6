@@ -1392,6 +1392,8 @@ class PromptServer():
                 web.static('/docs', embedded_docs_path)
             ])
 
+        self.user_manager.add_direct_login_routes(self.app, self.web_root)
+
         self.app.add_routes([
             web.static('/', self.web_root),
         ])
