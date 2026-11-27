@@ -4,6 +4,12 @@ from aiohttp import web
 import logging
 
 
+DEFAULT_SETTINGS = {
+    "Comfy.Locale": "es",
+    "Comfy.ColorPalette": "light",
+}
+
+
 class AppSettings():
     def __init__(self, user_manager):
         self.user_manager = user_manager
@@ -20,12 +26,12 @@ class AppSettings():
         if os.path.isfile(file):
             try:
                 with open(file) as f:
-                    return json.load(f)
+                    return {**DEFAULT_SETTINGS, **json.load(f)}
             except:
                 logging.error(f"The user settings file is corrupted: {file}")
-                return {}
+                return DEFAULT_SETTINGS.copy()
         else:
-            return {}
+            return DEFAULT_SETTINGS.copy()
 
     def save_settings(self, request, settings):
         file = self.user_manager.get_request_user_filepath(

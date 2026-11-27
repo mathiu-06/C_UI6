@@ -1706,6 +1706,9 @@ async function loadSavedWorkflow(userId, relPath) {
         renderActiveUserBar();
         fitWorkflowInView();
         renderInspector();
+        if (!state.objectInfo) {
+            fetchObjectInfoFallback();
+        }
     } catch {
         // Ignore missing/unreadable workflow.
     }
@@ -2011,7 +2014,6 @@ async function checkAuthAndStart() {
         }
         hideAuthOverlay();
         connectObserverWs();
-        fetchObjectInfoFallback();
     } catch {
         setConnectionUi("error", "Server unreachable");
         setTimeout(checkAuthAndStart, 2500);
@@ -2151,7 +2153,6 @@ el.authForm.addEventListener("submit", async (e) => {
             el.authInput.value = "";
             hideAuthOverlay();
             connectObserverWs();
-            fetchObjectInfoFallback();
         } else {
             state.token = "";
             showAuthOverlay("Incorrect token.");

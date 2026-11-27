@@ -5,7 +5,7 @@ from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from typing import Dict, Any
 
-from middleware.cache_middleware import cache_control, ONE_HOUR, ONE_DAY, IMG_EXTENSIONS
+from middleware.cache_middleware import cache_control, ONE_HOUR, ONE_DAY, ONE_YEAR, IMG_EXTENSIONS
 
 pytestmark = pytest.mark.asyncio  # Apply asyncio mark to all tests
 
@@ -37,6 +37,27 @@ CACHE_SCENARIOS = [
     {
         "name": "css_no_store",
         "path": "/styles.css",
+        "status": 200,
+        "expected_cache": "no-store",
+        "should_have_header": True,
+    },
+    {
+        "name": "hashed_assets_js_immutable",
+        "path": "/assets/index-abc123.js",
+        "status": 200,
+        "expected_cache": f"public, max-age={ONE_YEAR}, immutable",
+        "should_have_header": True,
+    },
+    {
+        "name": "hashed_assets_css_immutable",
+        "path": "/assets/index-abc123.css",
+        "status": 200,
+        "expected_cache": f"public, max-age={ONE_YEAR}, immutable",
+        "should_have_header": True,
+    },
+    {
+        "name": "extensions_js_no_store",
+        "path": "/extensions/live_view/reporter.js",
         "status": 200,
         "expected_cache": "no-store",
         "should_have_header": True,
