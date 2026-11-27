@@ -1,11 +1,77 @@
 // Strictly read-only real-time ComfyUI workflow monitor.
 
 const TOKEN_STORAGE_KEY = "Comfy.liveViewToken";
+const THEME_STORAGE_KEY = "Comfy.liveViewTheme";
 const HEADER_HEIGHT = 30;
 const SLOT_HEIGHT = 20;
 const WIDGET_ROW_HEIGHT = 22;
 const NODE_PADDING = 10;
 const CURSOR_SEND_INTERVAL_MS = 32;
+
+const CANVAS_THEMES = {
+    dark: {
+        bg: "#111318",
+        gridDot: "rgba(148, 163, 184, 0.14)",
+        groupTitle: "#dce3f0",
+        nodeBody: "#212530",
+        nodeBodyBypassed: "#2d2138",
+        nodeHeader: "#2d3343",
+        nodeHeaderMuted: "#333949",
+        nodeHeaderBypassed: "#5b3278",
+        nodeBorder: "#3a4256",
+        nodeRunning: "#4ade80",
+        nodeRunningGlow: "rgba(74, 222, 128, 0.75)",
+        nodeError: "#f87171",
+        nodeSelected: "#60a5fa",
+        titleText: "#eef2fa",
+        tagText: "rgba(226, 232, 240, 0.55)",
+        slotUnlinkedFill: "#1a1e28",
+        slotLabel: "#cbd5e1",
+        widgetBg: "rgba(13, 15, 20, 0.7)",
+        widgetBorder: "rgba(71, 85, 105, 0.45)",
+        widgetLongText: "#d4dce9",
+        widgetLabel: "#8a96ad",
+        widgetValue: "#e2e8f0",
+        imageBg: "#0b0d12",
+        progressTrack: "rgba(15, 23, 42, 0.85)",
+        screenFrameInside: "rgba(96, 165, 250, 0.55)",
+        screenFrameOutside: "rgba(255, 107, 43, 0.85)",
+        screenLabelInside: "#93c5fd",
+        screenLabelOutside: "#ff9f6b",
+        emptyText: "#6c758a",
+    },
+    light: {
+        bg: "#eef2f7",
+        gridDot: "rgba(100, 116, 139, 0.24)",
+        groupTitle: "#1e293b",
+        nodeBody: "#ffffff",
+        nodeBodyBypassed: "#f5f0ff",
+        nodeHeader: "#e5eaf2",
+        nodeHeaderMuted: "#e2e8f0",
+        nodeHeaderBypassed: "#ddd6fe",
+        nodeBorder: "#c4cedd",
+        nodeRunning: "#16a34a",
+        nodeRunningGlow: "rgba(22, 163, 74, 0.5)",
+        nodeError: "#dc2626",
+        nodeSelected: "#2563eb",
+        titleText: "#141923",
+        tagText: "rgba(51, 65, 85, 0.7)",
+        slotUnlinkedFill: "#ffffff",
+        slotLabel: "#334155",
+        widgetBg: "#f3f6fa",
+        widgetBorder: "#cbd5e1",
+        widgetLongText: "#1e293b",
+        widgetLabel: "#64748b",
+        widgetValue: "#0f172a",
+        imageBg: "#e2e8f0",
+        progressTrack: "rgba(15, 23, 42, 0.16)",
+        screenFrameInside: "rgba(37, 99, 235, 0.6)",
+        screenFrameOutside: "rgba(234, 88, 12, 0.9)",
+        screenLabelInside: "#1d4ed8",
+        screenLabelOutside: "#c2410c",
+        emptyText: "#64748b",
+    },
+};
 
 const SLOT_TYPE_COLORS = {
     MODEL: "#b39ddb",
@@ -38,6 +104,7 @@ const state = {
     wsReconnectDelay: 1000,
     wsReconnectTimer: null,
     connected: false,
+    darkMode: true,
 
     mode: "focus", // "focus" | "grid"
     users: [],
@@ -76,6 +143,7 @@ const el = {
     queueBadge: document.getElementById("queue-badge"),
 
     btnToggleSidebar: document.getElementById("btn-toggle-sidebar"),
+    toggleDarkMode: document.getElementById("toggle-dark-mode"),
     btnToggleInspector: document.getElementById("btn-toggle-inspector"),
     btnCloseInspector: document.getElementById("btn-close-inspector"),
     btnLogout: document.getElementById("btn-logout"),
@@ -444,15 +512,46 @@ function drawPointerMarker(targetCtx, gx, gy, scale, fillColor, strokeColor, lab
     targetCtx.restore();
 }
 
+function getCanvasTheme() {
+    return state.darkMode ? CANVAS_THEMES.dark : CANVAS_THEMES.light;
+}
+
+function isColorLight(color) {
+    if (typeof color !== "string") return false;
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+    if (!m) return false;
+    let h = m[1];
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 150;
+}
+
+function applyTheme(isDark, persist = true) {
+    state.darkMode = Boolean(isDark);
+    document.documentElement.dataset.theme = state.darkMode ? "dark" : "light";
+    if (el.toggleDarkMode) {
+        el.toggleDarkMode.checked = state.darkMode;
+    }
+    if (persist) {
+        try {
+            localStorage.setItem(THEME_STORAGE_KEY, state.darkMode ? "dark" : "light");
+        } catch {}
+    }
+    requestRender();
+}
+
 function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, options = {}) {
     const {
         selectedNodeId = null,
         interactiveLayoutOut = null,
         mini = false,
     } = options;
+    const theme = getCanvasTheme();
 
     targetCtx.save();
-    targetCtx.fillStyle = "#111318";
+    targetCtx.fillStyle = theme.bg;
     targetCtx.fillRect(0, 0, width, height);
 
     const workflow = snapshot?.workflow;
@@ -464,7 +563,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         const step = 40 * camera.scale;
         const startX = ((camera.x % step) + step) % step;
         const startY = ((camera.y % step) + step) % step;
-        targetCtx.fillStyle = "rgba(148, 163, 184, 0.14)";
+        targetCtx.fillStyle = theme.gridDot;
         for (let gx = startX; gx < width; gx += step) {
             for (let gy = startY; gy < height; gy += step) {
                 targetCtx.fillRect(gx, gy, 1.5, 1.5);
@@ -499,7 +598,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             if (!mini && g.title) {
                 const fs = Math.min(Math.max(g.font_size || 20, 13), 30);
                 targetCtx.font = `600 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`;
-                targetCtx.fillStyle = "#dce3f0";
+                targetCtx.fillStyle = theme.groupTitle;
                 targetCtx.fillText(String(g.title), gx + 10, gy + fs + 6);
             }
             targetCtx.restore();
@@ -602,20 +701,29 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         targetCtx.save();
         if (isMuted) targetCtx.globalAlpha = 0.55;
 
+        const bodyColor = isBypassed ? theme.nodeBodyBypassed : (node.bgcolor || theme.nodeBody);
+        const headerColor = isBypassed
+            ? theme.nodeHeaderBypassed
+            : isMuted
+                ? theme.nodeHeaderMuted
+                : (node.color || theme.nodeHeader);
+        const headerTheme = (!isBypassed && !isMuted && node.color)
+            ? (isColorLight(headerColor) ? CANVAS_THEMES.light : CANVAS_THEMES.dark)
+            : theme;
+        const bodyTheme = (!isBypassed && node.bgcolor)
+            ? (isColorLight(bodyColor) ? CANVAS_THEMES.light : CANVAS_THEMES.dark)
+            : theme;
+
         // Node body
         drawRoundedRect(targetCtx, r.x, r.topY, r.w, r.totalH, 8);
-        targetCtx.fillStyle = isBypassed ? "#2d2138" : (node.bgcolor || "#212530");
+        targetCtx.fillStyle = bodyColor;
         targetCtx.fill();
 
         // Header bar
         targetCtx.save();
         drawRoundedRect(targetCtx, r.x, r.topY, r.w, r.totalH, 8);
         targetCtx.clip();
-        targetCtx.fillStyle = isBypassed
-            ? "#5b3278"
-            : isMuted
-                ? "#333949"
-                : (node.color || "#2d3343");
+        targetCtx.fillStyle = headerColor;
         targetCtx.fillRect(r.x, r.topY, r.w, HEADER_HEIGHT);
         targetCtx.restore();
 
@@ -623,22 +731,22 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         drawRoundedRect(targetCtx, r.x, r.topY, r.w, r.totalH, 8);
         if (isRunning) {
             targetCtx.lineWidth = 3.2;
-            targetCtx.strokeStyle = "#4ade80";
-            targetCtx.shadowColor = "rgba(74, 222, 128, 0.75)";
+            targetCtx.strokeStyle = theme.nodeRunning;
+            targetCtx.shadowColor = theme.nodeRunningGlow;
             targetCtx.shadowBlur = 14;
             targetCtx.stroke();
             targetCtx.shadowBlur = 0;
         } else if (isError) {
             targetCtx.lineWidth = 3;
-            targetCtx.strokeStyle = "#f87171";
+            targetCtx.strokeStyle = theme.nodeError;
             targetCtx.stroke();
         } else if (isSelected) {
             targetCtx.lineWidth = 2.5;
-            targetCtx.strokeStyle = "#60a5fa";
+            targetCtx.strokeStyle = theme.nodeSelected;
             targetCtx.stroke();
         } else {
             targetCtx.lineWidth = 1.2;
-            targetCtx.strokeStyle = "#3a4256";
+            targetCtx.strokeStyle = theme.nodeBorder;
             targetCtx.stroke();
         }
 
@@ -650,14 +758,14 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             targetCtx.rect(r.x + 8, r.topY, r.w - 38, HEADER_HEIGHT);
             targetCtx.clip();
             targetCtx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
-            targetCtx.fillStyle = "#eef2fa";
+            targetCtx.fillStyle = headerTheme.titleText;
             targetCtx.textBaseline = "middle";
             targetCtx.fillText(title, r.x + 10, r.topY + HEADER_HEIGHT / 2 + 0.5);
             targetCtx.restore();
 
             if (!mini) {
                 targetCtx.font = "500 10px ui-monospace, monospace";
-                targetCtx.fillStyle = "rgba(226, 232, 240, 0.55)";
+                targetCtx.fillStyle = headerTheme.tagText;
                 targetCtx.textAlign = "right";
                 targetCtx.textBaseline = "middle";
                 const tag = isBypassed ? "BYP" : isMuted ? "MUTE" : `#${node.id}`;
@@ -669,7 +777,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         if (r.collapsed || mini) {
             if (mini && isRunning && progress && progress.max > 0) {
                 const pct = Math.max(0, Math.min(1, progress.value / progress.max));
-                targetCtx.fillStyle = "#4ade80";
+                targetCtx.fillStyle = theme.nodeRunning;
                 targetCtx.fillRect(r.x, r.topY + r.totalH - 5, r.w * pct, 5);
             }
             targetCtx.restore();
@@ -686,13 +794,13 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             const linked = inp.link !== null && inp.link !== undefined;
             targetCtx.beginPath();
             targetCtx.arc(r.x, sy, 4.5, 0, Math.PI * 2);
-            targetCtx.fillStyle = linked ? slotColor(inp.type) : "#1a1e28";
+            targetCtx.fillStyle = linked ? slotColor(inp.type) : bodyTheme.slotUnlinkedFill;
             targetCtx.fill();
             targetCtx.lineWidth = 1.5;
             targetCtx.strokeStyle = slotColor(inp.type);
             targetCtx.stroke();
 
-            targetCtx.fillStyle = "#cbd5e1";
+            targetCtx.fillStyle = bodyTheme.slotLabel;
             targetCtx.fillText(String(inp.label || inp.name || ""), r.x + 10, sy);
         }
 
@@ -703,13 +811,13 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             const linked = Array.isArray(out.links) && out.links.length > 0;
             targetCtx.beginPath();
             targetCtx.arc(r.x + r.w, sy, 4.5, 0, Math.PI * 2);
-            targetCtx.fillStyle = linked ? slotColor(out.type) : "#1a1e28";
+            targetCtx.fillStyle = linked ? slotColor(out.type) : bodyTheme.slotUnlinkedFill;
             targetCtx.fill();
             targetCtx.lineWidth = 1.5;
             targetCtx.strokeStyle = slotColor(out.type);
             targetCtx.stroke();
 
-            targetCtx.fillStyle = "#cbd5e1";
+            targetCtx.fillStyle = bodyTheme.slotLabel;
             targetCtx.fillText(String(out.label || out.name || ""), r.x + r.w - 10, sy);
         }
         targetCtx.textAlign = "left";
@@ -725,10 +833,10 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             if (curY + boxH > maxWidgetBottom) break;
 
             drawRoundedRect(targetCtx, r.x + 8, curY, r.w - 16, boxH, 4);
-            targetCtx.fillStyle = "rgba(13, 15, 20, 0.7)";
+            targetCtx.fillStyle = bodyTheme.widgetBg;
             targetCtx.fill();
             targetCtx.lineWidth = 1;
-            targetCtx.strokeStyle = "rgba(71, 85, 105, 0.45)";
+            targetCtx.strokeStyle = bodyTheme.widgetBorder;
             targetCtx.stroke();
 
             targetCtx.save();
@@ -739,7 +847,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             const wLabel = w.label || w.name || "";
             if (isLongText) {
                 targetCtx.font = "10.5px ui-monospace, monospace";
-                targetCtx.fillStyle = "#d4dce9";
+                targetCtx.fillStyle = bodyTheme.widgetLongText;
                 targetCtx.textBaseline = "top";
                 const cleanText = valStr.replace(/\s+/g, " ").trim();
                 const charsPerLine = Math.max(18, Math.floor((r.w - 26) / 6.3));
@@ -756,11 +864,11 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             } else {
                 targetCtx.font = "10.5px -apple-system, BlinkMacSystemFont, sans-serif";
                 targetCtx.textBaseline = "middle";
-                targetCtx.fillStyle = "#8a96ad";
+                targetCtx.fillStyle = bodyTheme.widgetLabel;
                 targetCtx.fillText(wLabel, r.x + 13, curY + boxH / 2 + 0.5);
 
                 targetCtx.font = "10.5px ui-monospace, monospace";
-                targetCtx.fillStyle = "#e2e8f0";
+                targetCtx.fillStyle = bodyTheme.widgetValue;
                 targetCtx.textAlign = "right";
                 targetCtx.fillText(formatWidgetShortValue(w.value), r.x + r.w - 13, curY + boxH / 2 + 0.5);
                 targetCtx.textAlign = "left";
@@ -776,7 +884,7 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
             if (imgAreaH >= 50) {
                 const entry = getCachedImage(r.images[0]);
                 drawRoundedRect(targetCtx, r.x + 8, curY, imgAreaW, imgAreaH, 5);
-                targetCtx.fillStyle = "#0b0d12";
+                targetCtx.fillStyle = bodyTheme.imageBg;
                 targetCtx.fill();
                 if (entry.status === "loaded" && entry.img.naturalWidth > 0) {
                     const scale = Math.min(
@@ -795,9 +903,9 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
         // Live node progress bar
         if (isRunning && progress && progress.max > 0) {
             const pct = Math.max(0, Math.min(1, progress.value / progress.max));
-            targetCtx.fillStyle = "rgba(15, 23, 42, 0.85)";
+            targetCtx.fillStyle = theme.progressTrack;
             targetCtx.fillRect(r.x + 1, r.y - 3, r.w - 2, 4);
-            targetCtx.fillStyle = "#4ade80";
+            targetCtx.fillStyle = theme.nodeRunning;
             targetCtx.fillRect(r.x + 1, r.y - 3, (r.w - 2) * pct, 4);
         }
 
@@ -826,14 +934,14 @@ function renderWorkflowToCanvas(targetCtx, width, height, snapshot, camera, opti
 
         const inv = 1 / Math.max(camera.scale, 0.08);
         targetCtx.save();
-        targetCtx.strokeStyle = isOutside ? "rgba(255, 107, 43, 0.85)" : "rgba(96, 165, 250, 0.55)";
+        targetCtx.strokeStyle = isOutside ? theme.screenFrameOutside : theme.screenFrameInside;
         targetCtx.lineWidth = 1.6 * inv;
         targetCtx.setLineDash([7 * inv, 5 * inv]);
         targetCtx.strokeRect(winX, winY, winW, winH);
         targetCtx.setLineDash([]);
 
         targetCtx.font = `600 ${11 * inv}px -apple-system, BlinkMacSystemFont, sans-serif`;
-        targetCtx.fillStyle = isOutside ? "#ff9f6b" : "#93c5fd";
+        targetCtx.fillStyle = isOutside ? theme.screenLabelOutside : theme.screenLabelInside;
         targetCtx.textBaseline = "bottom";
         targetCtx.fillText(
             isOutside ? "User's Screen (Edge Light Active)" : "User's Screen",
@@ -1519,9 +1627,10 @@ function renderGridCanvases() {
             };
             renderWorkflowToCanvas(mctx, w, h, snap, cam, { mini: true });
         } else {
-            mctx.fillStyle = "#111318";
+            const theme = getCanvasTheme();
+            mctx.fillStyle = theme.bg;
             mctx.fillRect(0, 0, w, h);
-            mctx.fillStyle = "#6c758a";
+            mctx.fillStyle = theme.emptyText;
             mctx.font = "12px -apple-system, BlinkMacSystemFont, sans-serif";
             mctx.textAlign = "center";
             mctx.textBaseline = "middle";
@@ -2178,6 +2287,12 @@ el.btnToggleSidebar.addEventListener("click", () => {
     requestRender();
 });
 
+if (el.toggleDarkMode) {
+    el.toggleDarkMode.addEventListener("change", () => {
+        applyTheme(el.toggleDarkMode.checked, true);
+    });
+}
+
 el.btnToggleInspector.addEventListener("click", () => {
     el.inspector.classList.toggle("collapsed");
     requestRender();
@@ -2264,6 +2379,12 @@ setInterval(() => {
         renderActiveUserBar();
     }
 }, 10000);
+
+let savedTheme = "dark";
+try {
+    savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || "dark";
+} catch {}
+applyTheme(savedTheme !== "light", false);
 
 bindCanvasInteractions();
 checkAuthAndStart();

@@ -4,7 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ComfyUI Live View (Read-Only)</title>
-    <link rel="stylesheet" href="/live-view/assets/viewer.css?v=4">
+    <script>
+        try {
+            if (localStorage.getItem("Comfy.liveViewTheme") === "light") {
+                document.documentElement.dataset.theme = "light";
+            }
+        } catch {}
+    </script>
+    <link rel="stylesheet" href="/live-view/assets/viewer.css?v=5">
 </head>
 <body>
     <div id="auth-overlay" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="auth-title">
@@ -81,6 +88,13 @@
             </div>
 
             <div class="topbar-right">
+                <label class="theme-switch" title="Turn dark mode on or off">
+                    <input id="toggle-dark-mode" type="checkbox" checked aria-label="Dark mode">
+                    <span class="theme-switch-track" aria-hidden="true">
+                        <span class="theme-switch-thumb"></span>
+                    </span>
+                    <span class="theme-switch-label">Dark</span>
+                </label>
                 <span id="queue-badge" class="badge badge-neutral">Queue: 0</span>
                 <button id="btn-toggle-inspector" class="btn" type="button" title="Toggle Read-Only Node Inspector">Inspector</button>
                 <button id="btn-logout" class="btn hidden" type="button" title="Lock Live View">Lock</button>
@@ -155,6 +169,6 @@
         <div id="lightbox-caption" class="lightbox-caption"></div>
     </div>
 
-    <script type="module" src="/live-view/assets/viewer.js?v=4"></script>
+    <script type="module" src="/live-view/assets/viewer.js?v=5"></script>
 </body>
 </html>

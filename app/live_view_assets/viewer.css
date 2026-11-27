@@ -1,4 +1,5 @@
 :root {
+    color-scheme: dark;
     --bg-base: #111318;
     --bg-panel: #171a21;
     --bg-elevated: #1e222c;
@@ -18,6 +19,27 @@
     --danger-dim: rgba(248, 113, 113, 0.16);
     --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Helvetica, Arial, sans-serif;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+    --bg-base: #eef2f7;
+    --bg-panel: #ffffff;
+    --bg-elevated: #f4f6fa;
+    --bg-hover: #e7ecf4;
+    --border: #d5dde8;
+    --border-strong: #b8c4d6;
+    --text-primary: #141923;
+    --text-secondary: #4b5565;
+    --text-muted: #6b7688;
+    --accent: #2563eb;
+    --accent-dim: rgba(37, 99, 235, 0.12);
+    --live: #16a34a;
+    --live-dim: rgba(22, 163, 74, 0.13);
+    --warn: #b45309;
+    --warn-dim: rgba(245, 158, 11, 0.16);
+    --danger: #dc2626;
+    --danger-dim: rgba(220, 38, 38, 0.12);
 }
 
 * {
@@ -963,9 +985,148 @@ html, body {
 }
 
 .lightbox-caption {
-    color: var(--text-secondary);
+    color: #cbd5e1;
     font-family: var(--mono);
     font-size: 12px;
+}
+
+/* Dark Mode Switch */
+.theme-switch {
+    height: 30px;
+    padding: 0 9px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.theme-switch:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+}
+
+.theme-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    pointer-events: none;
+}
+
+.theme-switch-track {
+    width: 30px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--border-strong);
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.16s ease;
+}
+
+.theme-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    transition: transform 0.16s ease;
+}
+
+.theme-switch input:checked + .theme-switch-track {
+    background: var(--accent);
+}
+
+.theme-switch input:checked + .theme-switch-track .theme-switch-thumb {
+    transform: translateX(14px);
+}
+
+.theme-switch input:focus-visible + .theme-switch-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Light Mode overrides for surfaces with translucent or high-contrast dark tints */
+:root[data-theme="light"] .badge-readonly {
+    border-color: rgba(37, 99, 235, 0.3);
+}
+
+:root[data-theme="light"] .badge-running {
+    border-color: rgba(22, 163, 74, 0.35);
+}
+
+:root[data-theme="light"] .badge-error {
+    border-color: rgba(220, 38, 38, 0.32);
+}
+
+:root[data-theme="light"] .btn.active {
+    border-color: rgba(37, 99, 235, 0.45);
+}
+
+:root[data-theme="light"] .btn.cursor-active {
+    background: rgba(234, 88, 12, 0.14);
+    border-color: rgba(234, 88, 12, 0.65);
+    color: #c2410c;
+}
+
+:root[data-theme="light"] .seg-btn.active {
+    background: var(--bg-panel);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] .user-item.selected {
+    border-color: rgba(37, 99, 235, 0.45);
+}
+
+:root[data-theme="light"] .mini-progress {
+    background: rgba(15, 23, 42, 0.1);
+}
+
+:root[data-theme="light"] .saved-item.active {
+    border-color: rgba(217, 119, 6, 0.4);
+}
+
+:root[data-theme="light"] .saved-banner {
+    color: #92400e;
+    border-bottom-color: rgba(217, 119, 6, 0.32);
+}
+
+:root[data-theme="light"] .active-user-bar {
+    background: rgba(255, 255, 255, 0.94);
+}
+
+:root[data-theme="light"] .empty-card {
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] .grid-card.running {
+    border-color: rgba(22, 163, 74, 0.55);
+}
+
+:root[data-theme="light"] .insp-error-box {
+    color: #991b1b;
+    border-color: rgba(220, 38, 38, 0.35);
+}
+
+:root[data-theme="light"] .auth-overlay {
+    background: rgba(238, 242, 247, 0.88);
+}
+
+:root[data-theme="light"] .auth-card {
+    box-shadow: 0 20px 50px rgba(15, 23, 42, 0.14);
 }
 
 @media (max-width: 960px) {
