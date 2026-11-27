@@ -70,6 +70,10 @@ class InternalRoutes:
             return web.json_response([f"{entry.name} [{directory_type}]" for entry in sorted_files], status=200)
 
 
+        @self.routes.post('/models/download')
+        async def download_model(request: web.Request) -> web.Response:
+            return await self.prompt_server.model_download_manager.handle_download_request(request)
+
     def get_app(self):
         if self._app is None:
             self._app = web.Application()

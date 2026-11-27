@@ -62,6 +62,7 @@ if dependencies_available():
 from app import agent_host
 from app.user_manager import UserManager
 from app.live_view import LiveViewManager, redact_cli_argv
+from app.model_downloader import ModelDownloadManager
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
@@ -271,6 +272,7 @@ class PromptServer():
         self.internal_routes = InternalRoutes(self)
         self.deploy_to_cloud_routes = deploy_to_cloud.DeployToCloudRoutes(self)
         self.live_view_manager = LiveViewManager(self)
+        self.model_download_manager = ModelDownloadManager(self)
         self.supports = ["custom_nodes_from_web"]
         self.prompt_queue = execution.PromptQueue(self)
         self.loop = loop
@@ -435,6 +437,7 @@ class PromptServer():
                     name) + "/" + os.path.relpath(f, dir).replace("\\", "/"), files)))
 
             extensions.extend(self.live_view_manager.get_extension_urls())
+            extensions.extend(self.model_download_manager.get_extension_urls())
 
             return web.json_response(extensions)
 
@@ -1354,6 +1357,7 @@ class PromptServer():
         # Registered after the /api duplication above, so these exist only under /api.
         self.deploy_to_cloud_routes.add_routes(self.app)
         self.live_view_manager.add_routes(self.app)
+        self.model_download_manager.add_routes(self.app)
 
         # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():
